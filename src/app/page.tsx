@@ -5,7 +5,6 @@ const pages = [
   { href: '/league', label: 'League' },
   { href: '/league/match', label: 'League Match' },
   { href: '/teams', label: 'Teams' },
-  { href: '/admin/upload', label: 'Admin Upload' },
 ];
 
 export default function Home() {
