@@ -17,11 +17,11 @@ import { Net } from "@/GamePlay/Object/Entities/Net";
 import { PhysicsConstants } from "@/GamePlay/Object/Physics/PhysicsConfig";
 import { FIELD_CONFIG } from "@/GamePlay/Object/Entities/FieldConfig";
 
-// ゴール設定
+// ゴール設定 (NBA spec)
 export const GOAL_CONFIG = {
   // リム（リング）設定
-  rimHeight: 2.00, // リムの高さ
-  rimDiameter: 0.45, // リムの内径（m）- 実際のサイズに近づける
+  rimHeight: 3.05, // リムの高さ（NBA: 10ft = 3.048m）
+  rimDiameter: 0.457, // リムの内径（m）- NBA: 18 inch
   rimThickness: 0.02, // リムの太さ（m）
   rimColor: '#FF6600', // リムの色（オレンジ）
 

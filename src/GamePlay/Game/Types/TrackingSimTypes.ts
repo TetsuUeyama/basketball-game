@@ -1,4 +1,6 @@
 import type { ActionScorerResult } from "./ActionScorerTypes";
+import type { ViolationState } from "../GameRules/ViolationDetector";
+import type { SimPlayerAbility } from "../Tactics/PlayerAbility";
 
 export interface SimMover {
   x: number; z: number;
@@ -7,6 +9,7 @@ export interface SimMover {
   vy: number;             // 垂直速度（正 = 上昇）
   speed: number;
   lastSpeed: number;     // 直前フレームの実効移動速度 (m/s)
+  prevSpeed: number;     // 2 フレーム前の実効速度 (加速度算出用、Phase H.1.1)
   momentumVx: number;    // 空中慣性 X (ジャンプ開始時にスナップショット)
   momentumVz: number;    // 空中慣性 Z (ジャンプ開始時にスナップショット)
   facing: number;        // 下半身の向き
@@ -16,6 +19,21 @@ export interface SimMover {
   height: number;        // 身長 (cm) 150〜225
   weight: number;        // 体重 (kg)
   scale: number;         // height / BASE_HEIGHT_CM — 描画・衝突スケール
+  // --- Phase H.1.1: 重心 (Center of Mass) モデル ---
+  /** COM 高さ (m)、scale から導出 */
+  comY: number;
+  /** スタンス幅 (m)、scale から導出。スタンス種別 (normal/defensive) で変化 */
+  stanceWidth: number;
+  /** COM の前後オフセット (m)、加減速で変化。正=前傾、負=後傾 */
+  comOffsetForward: number;
+  /** COM の左右オフセット (m)、急な方向転換で変化 */
+  comOffsetLateral: number;
+  /** バランス値 0..1 (1=安定、0=完全崩れ)。<0.4 で off-balance */
+  balance: number;
+  /** Phase H.4.4: 個人能力 (未設定なら DEFAULT_ABILITY) */
+  ability?: SimPlayerAbility;
+  /** Phase H.4.4: 累積疲労 0..100 (試合中に蓄積、休憩で減少) */
+  fatigue?: number;
 }
 
 export interface SimBall {
@@ -201,7 +219,7 @@ export interface SimState {
   offenseBase: number;              // 0 or 5 — オフェンス側エンティティの開始インデックス
   defenseBase: number;              // 5 or 0 — ディフェンス側エンティティの開始インデックス
   attackGoalX: number;              // 攻撃ゴールX（常に0）
-  attackGoalZ: number;              // 攻撃ゴールZ（+13.4 or -13.4）
+  attackGoalZ: number;              // 攻撃ゴールZ（+12.725 or -12.725）
   defendGoalZ: number;              // 守備ゴールZ（ファストブレイク時のリトリート先）
   zSign: 1 | -1;                   // ゾーン座標ミラーリング（チームAオフェンス=+1, チームBオフェンス=-1）
   teamScores: [number, number];     // [チームAゴール数, チームBゴール数]
@@ -244,4 +262,41 @@ export interface SimState {
   prevBallY: number;  // 前フレームのボールY座標（ゴール通過判定用）
   lastScorerResult: ActionScorerResult | null;  // 直近の ActionScorer 評価結果
   goalScoredTimer: number;  // ゴール成功後のリセット待機タイマー（0=待機なし）
+  lastShotReleasePos: { x: number; z: number } | null;  // 直前のシュート発射位置（2P/3P判定用）
+  lastShotPoints: 0 | 2 | 3;  // 直前のゴール成功時の得点 (UI 表示用、0 = 未確定)
+  periodTransitionTimer: number;  // クォーター/OT 終了後の待機タイマー (秒)。0 = 待機なし
+  violationState: ViolationState;  // 3秒・8秒バックコート違反検知用
+  /** 直近イベント (UI 表示用、空文字で非表示) */
+  lastEventMessage: string;
+  /** lastEventMessage を表示する残り時間 (秒) */
+  lastEventTimer: number;
+  /** ファウル/FT 解決中フラグ (true 中は通常update を停止) */
+  freezeDuringFreeThrow: boolean;
+  /** 進行中の FT 解決の残り時間 (秒) */
+  freeThrowResolveTimer: number;
+  /** 直前のパス成功情報 (アシスト判定用、3秒以内に成立シュートで assist) */
+  lastPassInfo: { passerAbsIdx: number; receiverAbsIdx: number; timeOfPass: number } | null;
+  /** 累積シミュレーション時間 (秒、アシスト窓判定で使用) */
+  simTimeAccum: number;
+  /** 直前にシュートを撃った絶対インデックス (-1 = 未確定) */
+  lastShooterAbsIdx: number;
+  /** Phase H.4.1: 現在のポゼッション開始時刻 (sim time) */
+  possessionStartTime: number;
+  /** Phase H.4.1: 直近の戦術プライオリティ評価結果 */
+  tacticalMode: 'team' | 'individual' | 'transition';
+  tacticalReason: string;
+  /** Phase H.5: 現在 active なオフェンススキーム名 (UI 表示用、null = 無し) */
+  activeOffenseSchemeId: string | null;
+  /** Phase H.5: 現在 active なディフェンススキーム名 */
+  activeDefenseSchemeId: string | null;
+  /** Phase H.5: 現在 active なトランジションスキーム名 */
+  activeTransitionSchemeId: string | null;
+  /** Phase H.5: オフボール選手のカット中状態 (offense rel idx 0-4 → カット情報) */
+  cutStates: { skillId: string; dest: { x: number; z: number }; remainingTime: number }[];
+  /** Phase H.5: 現フレームのオフェンス指示 (SchemeRunner が更新) */
+  schemeOffenseInstructions: { entityIdx: number; dest: { x: number; z: number } | null; speedMult: number; priority: number; label?: string }[];
+  /** Phase H.5: 現フレームのディフェンス指示 */
+  schemeDefenseInstructions: { entityIdx: number; dest: { x: number; z: number } | null; speedMult: number; priority: number; label?: string }[];
+  /** Phase H.5: 現フレームのトランジション指示 */
+  schemeTransitionInstructions: { entityIdx: number; dest: { x: number; z: number } | null; speedMult: number; priority: number; label?: string }[];
 }

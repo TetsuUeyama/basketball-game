@@ -384,10 +384,16 @@ export class SimVisualization {
   // Facing indicator (VOX head on top of each entity)
   // =========================================================================
 
-  /** VOXヘッドモデルを読み込み、全エンティティにクローンしてアタッチ */
+  /** VOXヘッドモデルを読み込み、全エンティティにクローンしてアタッチ
+   *  Phase 0 で新設した /api/vox-assets 経由で game-assets/vox/ から取得。
+   *  旧 /box/head.vox は public/ に存在しないため 404 になっていた。
+   */
   private async loadAndAttachHeads(): Promise<void> {
     try {
-      const result = await loadVoxHeadMesh(this.scene, "/box/head.vox");
+      const result = await loadVoxHeadMesh(
+        this.scene,
+        "/api/vox-assets/female/female_164cm/segments/head.x.vox",
+      );
       result.mesh.setEnabled(false);
 
       this.overlay.headFaceForwardOffset = result.faceForwardOffset;

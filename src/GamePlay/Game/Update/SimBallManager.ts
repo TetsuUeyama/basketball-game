@@ -211,6 +211,11 @@ export function executePendingShot(
   const target = state.pendingShot;
   state.pendingShot = null;
 
+  // 2P/3P 判定のために発射時のシューター位置を記録
+  state.lastShotReleasePos = { x: shooterMover.x, z: shooterMover.z };
+  // ボックススコア用にシューター絶対インデックスを記録
+  state.lastShooterAbsIdx = state.offenseBase + state.onBallEntityIdx;
+
   const shotType = classifyShotType(shooterMover);
   const releaseY = getReleaseYOffset(shotType) + shooterMover.y;
   const arcHeight = getArcHeight(shotType);

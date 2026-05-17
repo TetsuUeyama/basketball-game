@@ -6,16 +6,16 @@
  * 大枠（ブロック）: 5×5の升目をまとめた単位、3×6=18ブロック
  */
 
-// フィールド設定（バスケットコートサイズ）
+// フィールド設定（バスケットコートサイズ - NBA spec: 94ft × 50ft = 28.65m × 15.24m）
 export const FIELD_CONFIG = {
-  length: 30, // コートの長さ（m）- Z軸方向（5×5大枠が6つ並ぶ）
-  width: 15, // コートの幅（m）- X軸方向
+  length: 28.65, // コートの長さ（m）- Z軸方向（NBA: 94ft）
+  width: 15.24, // コートの幅（m）- X軸方向（NBA: 50ft）
   floorColor: '#F5D2B0', // 床の色（肌色 - バスケットコート）
   gridSize: 10, // グリッドのサイズ
   gridColor: '#D4B896', // グリッドの色（薄い茶色）
 
   // センターサークル設定
-  centerCircleRadius: 1.8, // センターサークル半径（m）- FIBA基準
+  centerCircleRadius: 1.83, // センターサークル半径（m）- NBA: 6ft = 1.83m
   centerCircleLineWidth: 0.05, // ラインの太さ（m）
   centerCircleColor: '#8B4513', // ラインの色（茶色 - 肌色床とのコントラスト確保）
 };

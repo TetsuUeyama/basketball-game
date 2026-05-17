@@ -117,6 +117,27 @@ export function computeHelpAssignments(
       }
       if (bestOi >= 0) {
         result.set(bestOi, state.onBallEntityIdx);
+
+        // Phase H.8: ヘルプ・ザ・ヘルパー (2 段階ローテーション)
+        // 一次ヘルパーの元マーク対象 → 別の DF が covering する
+        const primaryHelperOrigMark = OB_CONFIGS[bestOi].markTargetEntityIdx;
+        const origMarkMover = allOffense[primaryHelperOrigMark];
+        let secondBestOi = -1;
+        let secondBestDist = Infinity;
+        for (let oi = 0; oi < OB_CONFIGS.length; oi++) {
+          if (oi === onBallDefOi) continue;
+          if (oi === bestOi) continue;
+          if (state.obReacting[oi]) continue;
+          if (result.has(oi)) continue;
+          const d = dist2d(obstacles[oi].x, obstacles[oi].z, origMarkMover.x, origMarkMover.z);
+          if (d < secondBestDist) {
+            secondBestDist = d;
+            secondBestOi = oi;
+          }
+        }
+        if (secondBestOi >= 0) {
+          result.set(secondBestOi, primaryHelperOrigMark);
+        }
       }
     }
   }
@@ -175,16 +196,20 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
     if (markEntityIdx === state.onBallEntityIdx) {
       state.obMems[oi].searching = false;
 
-      // エンゲージライン外: ボール保持者がバックコートにいる場合は初期位置で待機
-      // （デッドボール後のトランジション中など）
+      // エンゲージライン外: ボール保持者と自陣リムの中間で待機 (マークに追随)
+      // Phase H.8: 旧実装は INIT_OBSTACLES 固定位置 → マークを放置していたため修正
       if (state.zSign === 1 ? markTarget.z < DEFENSE_ENGAGE_Z : markTarget.z > -DEFENSE_ENGAGE_Z) {
-        const waitPos = INIT_OBSTACLES[oi];
+        const ownGoalX = 0;
+        const ownGoalZ = state.defendGoalZ;
+        const waitX = (markTarget.x + ownGoalX) / 2;
+        const waitZ = (markTarget.z + ownGoalZ) / 2;
         // ボール保持者が自分よりゴールに近い → スプリントで戻る
         const obGD = dist2d(ob.x, ob.z, state.attackGoalX, state.attackGoalZ);
         const tgtGD = dist2d(markTarget.x, markTarget.z, state.attackGoalX, state.attackGoalZ);
         const beatenOnBall = obGD > tgtGD + BEATEN_GOAL_DIST_MARGIN;
-        const waitSpd = beatenOnBall ? cfg.interceptSpeed : cfg.idleSpeed;
-        setChaserVelocity(ob, waitPos.x, waitPos.z * state.zSign, waitSpd, cfg.hoverRadius, dt);
+        const farFromMark = dist2d(ob.x, ob.z, markTarget.x, markTarget.z) > 4.0;
+        const waitSpd = (beatenOnBall || farFromMark) ? cfg.interceptSpeed : cfg.idleSpeed;
+        setChaserVelocity(ob, waitX, waitZ, waitSpd, cfg.hoverRadius, dt);
         moveKeepFacing(ob, waitSpd, dt);
         orientToward(ob, markTarget.x, markTarget.z, dt);
         continue;
@@ -252,16 +277,25 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
     const isHelping = helpEntityIdx !== undefined;
     const effectiveTarget = isHelping ? allOffense[helpEntityIdx] : markTarget;
 
-    // --- マーク対象がエンゲージライン外: 初期位置で待機 ---
+    // --- マーク対象がディフェンス自陣の奥深く: マークとリムの中間で待機 ---
+    // Phase H.8: 旧実装は INIT_OBSTACLES (固定座標) で待機 → マーク対象から
+    //   大きく離れた場所で "うろうろ" して見える原因だった。
+    //   修正: 待機位置を「マークと自陣リムの中間」に動的計算することで、
+    //   マーク対象が動けば待機位置も追随する。
     if (state.zSign === 1 ? effectiveTarget.z < DEFENSE_ENGAGE_Z : effectiveTarget.z > -DEFENSE_ENGAGE_Z) {
-      const waitPos = INIT_OBSTACLES[oi];
-      const waitX = waitPos.x;
-      const waitZ = waitPos.z * state.zSign;
+      // 自陣リム位置 (defendGoalZ は state にあり)
+      const ownGoalX = 0;
+      const ownGoalZ = state.defendGoalZ;
+      // マークと自陣リムの中間に待機 (マーク追随しつつ自陣寄りに陣取る)
+      const waitX = (effectiveTarget.x + ownGoalX) / 2;
+      const waitZ = (effectiveTarget.z + ownGoalZ) / 2;
       // マーク対象が自分よりゴールに近い → スプリントで戻る
       const obGoalDist = dist2d(ob.x, ob.z, state.attackGoalX, state.attackGoalZ);
       const tgtGoalDist = dist2d(effectiveTarget.x, effectiveTarget.z, state.attackGoalX, state.attackGoalZ);
       const beaten = obGoalDist > tgtGoalDist + BEATEN_GOAL_DIST_MARGIN;
-      const waitSpeed = beaten ? cfg.interceptSpeed : cfg.idleSpeed;
+      // 実マークから 4m 以上離れていればスプリントで詰める
+      const farFromMark = dist2d(ob.x, ob.z, effectiveTarget.x, effectiveTarget.z) > 4.0;
+      const waitSpeed = (beaten || farFromMark) ? cfg.interceptSpeed : cfg.idleSpeed;
       setChaserVelocity(ob, waitX, waitZ, waitSpeed, cfg.hoverRadius, dt);
       moveKeepFacing(ob, waitSpeed, dt);
       orientToward(ob, effectiveTarget.x, effectiveTarget.z, dt);
@@ -271,17 +305,19 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
     // --- オフボール: パスライン・ディナイ ---
     // マーク対象とパッサー（オンボールOF）の間に入り、パスコースを遮断する。
     const mem = state.obMems[oi];
-    // ヘルプ時は実位置を直接追う、通常時はメモリ参照
-    // Safety: サーチ中のメモリが逆サイド（ゴール反対側）を指している場合は実位置を使う
-    let useMemory = mem.searching && !isHelping;
-    if (useMemory) {
-      const memOnCorrectSide = state.zSign === 1
-        ? mem.lastSeenTargetZ >= 0
-        : mem.lastSeenTargetZ <= 0;
-      if (!memOnCorrectSide) useMemory = false;
-    }
+    // Phase H.8: 実マーク位置から大きく乖離している場合は古いメモリを信頼せず実位置で chase
+    //   (サーチ中でも実位置を採用 → DF がマーク放置で関係ない位置に居続けるバグを防ぐ)
+    const distMemToReal = mem.searching
+      ? dist2d(mem.lastSeenTargetX, mem.lastSeenTargetZ, effectiveTarget.x, effectiveTarget.z)
+      : 0;
+    const useMemory = mem.searching && !isHelping && distMemToReal < 2.0;
     const chaseX = isHelping ? effectiveTarget.x : (useMemory ? mem.lastSeenTargetX : effectiveTarget.x);
     const chaseZ = isHelping ? effectiveTarget.z : (useMemory ? mem.lastSeenTargetZ : effectiveTarget.z);
+    // Phase H.8: メモリが乖離していたら強制更新 (古いキャッシュを最新位置で上書き)
+    if (mem.searching && distMemToReal >= 2.0) {
+      mem.lastSeenTargetX = effectiveTarget.x;
+      mem.lastSeenTargetZ = effectiveTarget.z;
+    }
 
     // パッサー方向: マーク対象からパッサーへのベクトル
     const pdx = passerMover.x - chaseX;
@@ -298,11 +334,16 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
     }
 
     // 速度選択: ヘルプ中 or DF位置から遠い or マーク対象に抜かれている → スプリント
+    // Phase H.8: 抜かれ判定は古いメモリではなく実際のマーク対象位置で判定する
+    //   (サーチ中でも実位置基準で beaten 検知すれば追随漏れを防げる)
     const distToDefPos = dist2d(ob.x, ob.z, defX, defZ);
     const obGoalDist = dist2d(ob.x, ob.z, state.attackGoalX, state.attackGoalZ);
-    const tgtGoalDist = dist2d(chaseX, chaseZ, state.attackGoalX, state.attackGoalZ);
-    const beatenByMark = obGoalDist > tgtGoalDist + BEATEN_GOAL_DIST_MARGIN;
-    const useSprint = isHelping || distToDefPos > SPRINT_TRIGGER_DIST || beatenByMark;
+    const realTgtGoalDist = dist2d(effectiveTarget.x, effectiveTarget.z, state.attackGoalX, state.attackGoalZ);
+    const beatenByMark = obGoalDist > realTgtGoalDist + BEATEN_GOAL_DIST_MARGIN;
+    // Phase H.8: 実際のマーク対象から離れすぎている場合もスプリント (DF が置き去りにされた)
+    const distToRealMark = dist2d(ob.x, ob.z, effectiveTarget.x, effectiveTarget.z);
+    const farFromMark = distToRealMark > 3.0;
+    const useSprint = isHelping || distToDefPos > SPRINT_TRIGGER_DIST || beatenByMark || farFromMark;
     const speed = useSprint ? cfg.interceptSpeed : cfg.idleSpeed;
 
     // 密着ディナイモード: マーク対象に近接 + サーチ中でない + ヘルプでない

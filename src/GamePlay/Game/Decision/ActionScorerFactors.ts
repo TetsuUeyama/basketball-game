@@ -373,6 +373,138 @@ export const holdSituational: ScoreFactor = {
 };
 
 // =========================================================================
+// Phase H.1.4: トリプルスレット意思決定 — ショットクロック + シュート脅威優先
+// =========================================================================
+
+/**
+ * 現代理論「シュート脅威優先」: シュート可能なら baseline でシュート意思を底上げ。
+ * canShoot() が true で、かつゴール方向に体が向いているとブースト。
+ */
+export const shootTripleThreatPriority: ScoreFactor = {
+  id: 'shoot:tripleThreatPriority',
+  action: 'shoot',
+  weight: 2.0,
+  evaluate(ctx: ActionScorerContext): number {
+    if (!canShoot(ctx.mover)) return 0;
+    // ゴール方向へのフェイシング (torso) ボーナス
+    const toGoalX = getGoalX() - ctx.mover.x;
+    const toGoalZ = getGoalZ() - ctx.mover.z;
+    const toGoalDist = Math.sqrt(toGoalX * toGoalX + toGoalZ * toGoalZ);
+    if (toGoalDist < 0.01) return 1;
+    const goalAngle = Math.atan2(toGoalZ, toGoalX);
+    const facingDiff = Math.abs(((ctx.mover.torsoFacing - goalAngle + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+    // 正面 (0 rad) で 1.0、横向き (PI/2) で 0.5、後ろ向き (PI) で 0
+    return clamp(1 - facingDiff / Math.PI, 0, 1);
+  },
+};
+
+/**
+ * ショットクロック緊急度: 残り少 → シュート weight 増加。
+ *  >12s: 0 (緊急度なし)
+ *  6-12s: 緩やかに増加
+ *  <6s: 急増 (1.0 に張り付く)
+ *  <3s: 強制シュート相当
+ */
+export const shootShotClockUrgency: ScoreFactor = {
+  id: 'shoot:shotClockUrgency',
+  action: 'shoot',
+  weight: 5.0,
+  evaluate(ctx: ActionScorerContext): number {
+    if (!canShoot(ctx.mover)) return 0;
+    const sc = ctx.shotClockRemaining;
+    if (sc === undefined) return 0;
+    if (sc >= 12) return 0;
+    if (sc >= 6) return clamp((12 - sc) / 6, 0, 1) * 0.5;
+    if (sc >= 3) return 0.5 + clamp((6 - sc) / 3, 0, 1) * 0.4;
+    return 1.0;
+  },
+};
+
+/**
+ * パス緊急度: ショットクロックがやや少ない時にパスでリセットを試みる動機。
+ *  10-15s: 0.3 程度 (中程度の余裕、パスを回す)
+ *  <6s: 減少 (もう撃つべき)
+ */
+export const passShotClockUrgency: ScoreFactor = {
+  id: 'pass:shotClockUrgency',
+  action: 'pass',
+  weight: 1.0,
+  evaluate(ctx: ActionScorerContext): number {
+    const sc = ctx.shotClockRemaining;
+    if (sc === undefined) return 0;
+    if (sc >= 15) return 0.2;
+    if (sc >= 10) return 0.5;
+    if (sc >= 6) return 0.3;
+    return 0; // 残り少 → パス回す余裕なし
+  },
+};
+
+/**
+ * ホールド/ドリブル緩衝: ショットクロック多 → じっくり仕掛ける。
+ *  >18s: 1.0 (じっくり)
+ *  10-18s: 0.5
+ *  <8s: 0 (急ぐべき)
+ */
+export const holdShotClockBuffer: ScoreFactor = {
+  id: 'hold:shotClockBuffer',
+  action: 'hold',
+  weight: 1.5,
+  evaluate(ctx: ActionScorerContext): number {
+    const sc = ctx.shotClockRemaining;
+    if (sc === undefined) return 0.5; // デフォルト中立
+    if (sc >= 18) return 1.0;
+    if (sc >= 10) return 0.5;
+    if (sc >= 6) return 0.2;
+    return 0;
+  },
+};
+
+/**
+ * Phase H.5: リム付近フリー時の最強シュート優先因子
+ * goalDist < 2.5m かつ DF 1.5m 以遠 → 1.0 で大きい weight 20
+ * これでオープンリムは確実にシュート。
+ */
+export const shootRimWideOpen: ScoreFactor = {
+  id: 'shoot:rimWideOpen',
+  action: 'shoot',
+  weight: 20.0,
+  evaluate(ctx: ActionScorerContext): number {
+    if (!canShoot(ctx.mover)) return 0;
+    const goalDist = dist2d(ctx.mover.x, ctx.mover.z, getGoalX(), getGoalZ());
+    if (goalDist >= 2.5) return 0;
+    // 最寄り DF が 1.5m 以遠ならドフリー
+    const dfDist = nearestDefenderDist(ctx);
+    if (dfDist < 1.5) return 0;
+    // 距離が近いほど + DF が遠いほど高い
+    return clamp(1.0 - goalDist / 2.5, 0, 1) * clamp((dfDist - 1.5) / 1.5, 0, 1);
+  },
+};
+
+/**
+ * Phase H.5: ミドル/3P レンジでドフリー時のシュート促進
+ * 脅威 DF なし + ショットレンジ内で 0.7 程度
+ */
+export const shootOpenRange: ScoreFactor = {
+  id: 'shoot:openRange',
+  action: 'shoot',
+  weight: 5.0,
+  evaluate(ctx: ActionScorerContext): number {
+    if (!canShoot(ctx.mover)) return 0;
+    const goalDist = dist2d(ctx.mover.x, ctx.mover.z, getGoalX(), getGoalZ());
+    if (goalDist < 2.5 || goalDist > 9.0) return 0;
+    // 脅威 DF なし = 完全オープン
+    const threatDist = nearestThreatDefenderDist(ctx);
+    if (threatDist === Infinity) {
+      // ミッドレンジ (3-6m) で 0.8、3P (6-9m) で 0.5
+      if (goalDist < 6.0) return 0.8;
+      return 0.5;
+    }
+    // 脅威 DF いるが距離あり
+    return clamp(threatDist / 4.0, 0, 1) * 0.5;
+  },
+};
+
+// =========================================================================
 // Default factor collection
 // =========================================================================
 
@@ -381,6 +513,8 @@ export const DEFAULT_FACTORS: ScoreFactor[] = [
   shootDefenderProximity,
   shootDefenderAwareness,
   shootSituational,
+  shootTripleThreatPriority,    // Phase H.1.4
+  shootShotClockUrgency,         // Phase H.1.4
   passLaneOpen,
   passReceiverIntent,
   passDistance,
@@ -388,8 +522,12 @@ export const DEFAULT_FACTORS: ScoreFactor[] = [
   passPositionAdvantage,
   passDefenderAwareness,
   passSituational,
+  passShotClockUrgency,          // Phase H.1.4
+  shootRimWideOpen,              // Phase H.5
+  shootOpenRange,                // Phase H.5
   holdSafety,
   holdDriveOpportunity,
   holdDefenderAwareness,
   holdSituational,
+  holdShotClockBuffer,           // Phase H.1.4
 ];

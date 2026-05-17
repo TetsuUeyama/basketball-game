@@ -18,6 +18,7 @@ import {
   FIRE_MAX,
 } from "../Config/BallTimingConfig";
 import type { SimMover } from "../Types/TrackingSimTypes";
+import { computeStanceWidth, computeCOMHeight, evaluateBalance } from "../Body/CenterOfMass";
 
 export function randAngle(): number {
   return Math.random() * Math.PI * 2;
@@ -108,10 +109,28 @@ export function makeMover(
   return {
     x, z, y: 0,
     vx: Math.cos(a) * speed, vz: Math.sin(a) * speed, vy: 0,
-    speed, lastSpeed: 0, momentumVx: 0, momentumVz: 0,
+    speed, lastSpeed: 0, prevSpeed: 0, momentumVx: 0, momentumVz: 0,
     facing: a, torsoFacing: a, neckFacing: a, nextTurn: randTurn(),
     height, weight, scale,
+    // Phase H.1.1: COM 初期値 (立位、バランス安定)
+    comY: computeCOMHeight(scale, 'normal'),
+    stanceWidth: computeStanceWidth(scale, 'normal'),
+    comOffsetForward: 0,
+    comOffsetLateral: 0,
+    balance: 1.0,
   };
+}
+
+/**
+ * Phase H.1.1: 1 フレームの終わりに COM/balance を更新する。
+ * 既存の moveWithFacing/moveKeepFacing 等の後に呼び出す想定。
+ */
+export function updateBalance(mover: SimMover, dt: number): void {
+  const balanceState = evaluateBalance(mover, mover.prevSpeed, dt);
+  mover.comOffsetForward = balanceState.comOffsetForward;
+  mover.comOffsetLateral = balanceState.comOffsetLateral;
+  mover.balance = balanceState.balance;
+  mover.prevSpeed = mover.lastSpeed;
 }
 
 export function makeScanMemory(lx: number, lz: number, tx: number, tz: number) {
@@ -237,10 +256,22 @@ export function blockOnBallByDefenders(
   mover.z = prevZ + mz;
 }
 
-/** Separate overlapping entities by pushing them apart (weight-based distribution) */
+/** 1 ペアあたりの最大押し戻し量 (m/フレーム)。 */
+const SEPARATE_MAX_PUSH_PER_PAIR = 0.05;
+/** 1 エンティティあたりの 1 フレーム累積最大押し戻し量 (m)。
+ *  密集時に複数ペアから同時に push されてもこの値を超えない。 */
+const SEPARATE_MAX_PUSH_PER_ENTITY = 0.08;
+
+/** Separate overlapping entities by pushing them apart (weight-based distribution).
+ *  Phase H.8: per-pair + per-entity の二重キャップでワープ防止。
+ */
 export function separateEntities(
   all: { mover: SimMover; radius: number; weight: number }[],
 ): void {
+  // 各エンティティの累積押し戻し量を追跡 (X / Z 別)
+  const pushX = new Array(all.length).fill(0);
+  const pushZ = new Array(all.length).fill(0);
+
   for (let i = 0; i < all.length; i++) {
     for (let j = i + 1; j < all.length; j++) {
       const a = all[i], b = all[j];
@@ -250,19 +281,35 @@ export function separateEntities(
       const minDist = a.radius + b.radius;
       if (distSq >= minDist * minDist || distSq < 0.0001) continue;
       const dist = Math.sqrt(distSq);
-      const overlap = minDist - dist;
+      const overlapRaw = minDist - dist;
+      // 1 ペア最大キャップ
+      const overlap = Math.min(overlapRaw, SEPARATE_MAX_PUSH_PER_PAIR);
       const nx = dx / dist;
       const nz = dz / dist;
       // 体重の逆比で分配（重い方が動きにくい）
       const totalWeight = a.weight + b.weight;
       const aRatio = b.weight / totalWeight;
       const bRatio = a.weight / totalWeight;
-      a.mover.x -= nx * overlap * aRatio;
-      a.mover.z -= nz * overlap * aRatio;
-      b.mover.x += nx * overlap * bRatio;
-      b.mover.z += nz * overlap * bRatio;
+      const aDx = -nx * overlap * aRatio;
+      const aDz = -nz * overlap * aRatio;
+      const bDx = nx * overlap * bRatio;
+      const bDz = nz * overlap * bRatio;
+      // 累積に加算
+      pushX[i] += aDx; pushZ[i] += aDz;
+      pushX[j] += bDx; pushZ[j] += bDz;
     }
   }
+
+  // 累積総量をエンティティ毎にキャップして適用
+  for (let i = 0; i < all.length; i++) {
+    const mag = Math.sqrt(pushX[i] * pushX[i] + pushZ[i] * pushZ[i]);
+    if (mag <= 0.0001) continue;
+    const cappedMag = Math.min(mag, SEPARATE_MAX_PUSH_PER_ENTITY);
+    const scale = cappedMag / mag;
+    all[i].mover.x += pushX[i] * scale;
+    all[i].mover.z += pushZ[i] * scale;
+  }
+
   // bounce で場外に出た分を補正
   for (const { mover } of all) {
     bounce(mover);

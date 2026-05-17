@@ -11,13 +11,16 @@ export const ON_BALL_SPEED_MULT = 0.75;  // ボール保持時の移動速度倍
 export const ONBALL_BLOCK_RADIUS = 1.2;  // ディフェンダーが進路を塞ぐ距離 (m)
 
 // --- Defense engage threshold ---
-export const DEFENSE_ENGAGE_Z = 6.0;  // 3Pアーク頂点付近（マーク対象がこのZ以上で追跡開始）
+// Phase H.8: 6.0 → 3.0 へ緩和 (ハーフコート手前から追跡開始、フリー化防止)
+export const DEFENSE_ENGAGE_Z = 3.0;  // マーク対象がこのZ以上で追跡開始 (ハーフコート寄り)
 
 // --- Defense positioning ---
 export const DEFENSE_GOAL_OFFSET = 0.8;   // ゴールライン・ポジション: マーク対象からゴール方向へのオフセット (m)
 export const FREE_PLAYER_DIST = 5.0;      // フリー判定: 最寄りDFがこの距離以上ならフリーとみなす (m)
-export const SPRINT_TRIGGER_DIST = 1.5;   // スプリント発動: DF位置からこの距離以上離れていたら全速力 (m)（OF同様、常時フルスピード追跡）
-export const BEATEN_GOAL_DIST_MARGIN = 1.5; // 抜かれ判定: オンボールDFがOFよりゴールからこの距離以上遠い → 抜かれた (m)
+// Phase H.8: 1.5 → 0.7 へ緩和 (微小なズレでも sprint で追随、反応性向上)
+export const SPRINT_TRIGGER_DIST = 0.7;   // スプリント発動: DF位置からこの距離以上離れていたら全速力 (m)
+// Phase H.8: 1.5 → 0.9 へ緩和 (抜かれ判定を早くしてヘルプ発動を早める)
+export const BEATEN_GOAL_DIST_MARGIN = 0.9; // 抜かれ判定: オンボールDFがOFよりゴールからこの距離以上遠い → 抜かれた (m)
 
 // --- On-ball defense (goal-line positioning with distance-based aggression) ---
 // ゴールからの距離に応じてマーク距離・ホバー半径・速度を線形補間する。
@@ -33,7 +36,8 @@ export const ONBALL_RECOVERY_DIST = 1.0;       // 理想位置からこの距離
 export const ONBALL_PASS_CONTEST_DIST = 3.5;   // パス飛行中: レシーバーがこの距離以内なら追跡して争う (m)
 
 // --- Off-ball pass lane denial ---
-export const OFFBALL_DENY_OFFSET = 1.0;        // オフボール: マーク対象からパッサー方向へのディナイ位置オフセット (m)
+// Phase H.8: 1.0 → 0.7 へ縮小 (タイトディナイ、パスコース遮断を強化)
+export const OFFBALL_DENY_OFFSET = 0.7;        // オフボール: マーク対象からパッサー方向へのディナイ位置オフセット (m)
 
 // --- Hand Push Obstruction ---
 export const PUSH_ACTIVATION_DIST = 1.2;   // プッシュ発動距離 — ディナイモード切替 (m)

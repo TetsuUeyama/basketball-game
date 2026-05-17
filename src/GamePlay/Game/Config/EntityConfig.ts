@@ -24,18 +24,19 @@ export const SOLVER_CFG_3D: SolverConfig = {
   bisectIterations: 10,
 };
 
-// --- Initial positions (metres, basketball court: goal1 at +Z≈13.4) ---
-export const INIT_LAUNCHER = { x: 0, z: 6.2 };     // PG - Top of Key
+// --- Initial positions (metres, basketball court NBA: goal1 at +Z≈12.725) ---
+// 3秒ルール回避: C と PF をペイント外に配置 (paint: |x|<2.44, 8.535<z<14.325)
+export const INIT_LAUNCHER = { x: 0, z: 5.55 };    // PG - Top of Key
 export const INIT_TARGETS = [
-  { x: 5.1,  z: 8.3 },   // SG / SECOND_HANDLER - Right Wing
-  { x: -5.1, z: 8.3 },   // SF / SLASHER - Left Wing
-  { x: 0,    z: 8.8 },   // C  / SCREENER - High Post
-  { x: 2.4,  z: 13.0 },  // PF / DUNKER - Low Post Right
+  { x: 5.1,  z: 7.65 },  // SG / SECOND_HANDLER - Right Wing
+  { x: -5.1, z: 7.65 },  // SF / SLASHER - Left Wing
+  { x: 0,    z: 7.5  },  // C  / SCREENER - High Post (ペイント外側、FT ライン手前)
+  { x: 3.5,  z: 11.5 },  // PF / DUNKER - Short Corner (ペイント外側 X)
 ];
 export const INIT_OBSTACLES = [
-  { x: 0,    z: 5.5 },   // A - guards PG (near Top)
-  { x: -4.5, z: 7.5 },   // B - guards SF (near Left Wing)
-  { x: 4.5,  z: 7.5 },   // C - guards SG (near Right Wing)
-  { x: 3.0,  z: 12.0 },  // D - guards PF (near Low Post)
-  { x: 0.5,  z: 8.0 },   // E - guards C (near High Post)
+  { x: 0,    z: 4.85 },  // A - guards PG (near Top)
+  { x: -4.5, z: 6.85 },  // B - guards SF (near Left Wing)
+  { x: 4.5,  z: 6.85 },  // C - guards SG (near Right Wing)
+  { x: 4.0,  z: 10.5 },  // D - guards PF (near Short Corner)
+  { x: 0.5,  z: 6.5  },  // E - guards C (near High Post)
 ];

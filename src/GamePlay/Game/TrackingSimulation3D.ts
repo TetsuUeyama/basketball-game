@@ -71,7 +71,37 @@ import { evaluatePreFire, attemptFire } from "./Decision/PassEvaluation";
 import { checkObstacleDeflection } from "./Update/BallCollision";
 import { CATCH_TIMING } from "./Action/CatchAction";
 import { computeShotTarget, computeShootTiming, classifyShotType, getJumpVelocity } from "./Action/ShootAction";
-import { GOAL1_RIM_X, GOAL1_RIM_Z, GOAL2_RIM_Z } from "./Config/GoalConfig";
+import { GOAL1_RIM_X, GOAL1_RIM_Z, GOAL2_RIM_Z, getShotPointValue, GOAL_RIM_Y } from "./Config/GoalConfig";
+import { GameClockManager } from "./GameRules/GameClockManager";
+import { ShotClockManager } from "./GameRules/ShotClockManager";
+import { FoulManager } from "./GameRules/FoulManager";
+import { PossessionArrow } from "./GameRules/PossessionArrow";
+import {
+  makeInitialViolationState,
+  tickViolations,
+  resetOnPossessionChange as resetViolationsOnPossessionChange,
+} from "./GameRules/ViolationDetector";
+import {
+  resolveFreeThrows,
+  getShootingFoulFreeThrowAttempts,
+} from "./GameRules/FreeThrowHandler";
+import { checkGoaltending } from "./GameRules/GoaltendingDetector";
+import { BoxScore } from "./GameRules/BoxScore";
+import { PlayByPlayLog, type PlayEventKind } from "./GameRules/PlayByPlayLog";
+import { TimeoutManager } from "./GameRules/TimeoutManager";
+import { evaluateTacticalPriority } from "./Tactics/TacticalPriority";
+import { computeFreeThrowProbability, DEFAULT_ABILITY } from "./Tactics/PlayerAbility";
+import {
+  runSchemes,
+  type ActiveSchemes,
+  findInstructionForPlayer,
+  findDefenseInstruction,
+  applyInstructionMovement,
+  evaluateCutForOffBall,
+} from "./Update/SchemeRunner";
+// Scheme/Skill 自動登録のため副作用 import
+import "./Scheme";
+import "./Skills";
 import { applyPossessionAliases, switchPossession } from "./Update/PossessionHelper";
 import {
   computeDribbleHand,
@@ -169,6 +199,27 @@ export class TrackingSimulation3D {
   private state!: SimState;
   private prevTime = 0;
   private lastDt = 0;
+  private gameClock = new GameClockManager();
+  private shotClock = new ShotClockManager();
+  private foulManager = new FoulManager();
+  private possessionArrow = new PossessionArrow();
+  private boxScore = new BoxScore(10);
+  private playByPlay = new PlayByPlayLog();
+  private timeoutManager = new TimeoutManager();
+  /** Phase H.5: 直近フレームで選択されたスキーム結果 (各 update modules から参照) */
+  private activeSchemes: ActiveSchemes = {
+    offenseScheme: null, offenseInstructions: [],
+    defenseScheme: null, defenseInstructions: [],
+    transitionScheme: null, transitionInstructions: [],
+  };
+  /** アシスト判定の時間窓 (秒) — パス成功から N 秒以内に同レシーバーが得点するとアシスト */
+  private static readonly ASSIST_WINDOW_SEC = 3.0;
+  /** クォーター終了後の自動再開までの待機秒数 */
+  private static readonly PERIOD_TRANSITION_PAUSE_SEC = 4.0;
+  /** FT 解決中の停止時間 (秒) */
+  private static readonly FT_RESOLVE_PAUSE_SEC = 3.0;
+  /** ブロック試行時のシューティングファウル確率 (per shot, not per frame) */
+  private static readonly SHOOTING_FOUL_PROB = 0.12;
 
   constructor(scene: Scene, ball: Ball) {
     this.scene = scene;
@@ -214,6 +265,66 @@ export class TrackingSimulation3D {
 
   public getPossession(): 0 | 1 {
     return this.state.possession;
+  }
+
+  public getGameClock(): GameClockManager {
+    return this.gameClock;
+  }
+
+  public getShotClock(): ShotClockManager {
+    return this.shotClock;
+  }
+
+  public getLastShotPoints(): 0 | 2 | 3 {
+    return this.state.lastShotPoints;
+  }
+
+  public getFoulManager(): FoulManager {
+    return this.foulManager;
+  }
+
+  public getLastEventMessage(): string {
+    return this.state.lastEventTimer > 0 ? this.state.lastEventMessage : '';
+  }
+
+  public getTacticalMode(): { mode: 'team' | 'individual' | 'transition'; reason: string } {
+    return { mode: this.state.tacticalMode, reason: this.state.tacticalReason };
+  }
+
+  public getActiveSchemes(): {
+    offense: { id: string; name: string } | null;
+    defense: { id: string; name: string } | null;
+    transition: { id: string; name: string } | null;
+    activeCuts: { entityIdx: number; skillId: string; remainingTime: number }[];
+  } {
+    const off = this.activeSchemes.offenseScheme;
+    const def = this.activeSchemes.defenseScheme;
+    const tr = this.activeSchemes.transitionScheme;
+    const cuts: { entityIdx: number; skillId: string; remainingTime: number }[] = [];
+    for (let ri = 1; ri < 5; ri++) {
+      const c = this.state.cutStates[ri];
+      if (c.remainingTime > 0 && c.skillId !== '') {
+        cuts.push({ entityIdx: this.state.offenseBase + ri, skillId: c.skillId, remainingTime: c.remainingTime });
+      }
+    }
+    return {
+      offense: off ? { id: off.id, name: off.displayName } : null,
+      defense: def ? { id: def.id, name: def.displayName } : null,
+      transition: tr ? { id: tr.id, name: tr.displayName } : null,
+      activeCuts: cuts,
+    };
+  }
+
+  public getBoxScore(): BoxScore {
+    return this.boxScore;
+  }
+
+  public getPlayByPlay(): PlayByPlayLog {
+    return this.playByPlay;
+  }
+
+  public getTimeoutManager(): TimeoutManager {
+    return this.timeoutManager;
   }
 
   public getPlayerStateManager(): SimPlayerStateManager {
@@ -362,7 +473,46 @@ export class TrackingSimulation3D {
       prevBallY: 0,
       lastScorerResult: null,
       goalScoredTimer: 0,
+      lastShotReleasePos: null,
+      lastShotPoints: 0,
+      periodTransitionTimer: 0,
+      violationState: makeInitialViolationState(),
+      lastEventMessage: '',
+      lastEventTimer: 0,
+      freezeDuringFreeThrow: false,
+      freeThrowResolveTimer: 0,
+      lastPassInfo: null,
+      simTimeAccum: 0,
+      lastShooterAbsIdx: -1,
+      possessionStartTime: 0,
+      tacticalMode: 'team',
+      tacticalReason: 'Initial setup',
+      activeOffenseSchemeId: null,
+      activeDefenseSchemeId: null,
+      activeTransitionSchemeId: null,
+      cutStates: [
+        { skillId: '', dest: { x: 0, z: 0 }, remainingTime: 0 },
+        { skillId: '', dest: { x: 0, z: 0 }, remainingTime: 0 },
+        { skillId: '', dest: { x: 0, z: 0 }, remainingTime: 0 },
+        { skillId: '', dest: { x: 0, z: 0 }, remainingTime: 0 },
+        { skillId: '', dest: { x: 0, z: 0 }, remainingTime: 0 },
+      ],
+      schemeOffenseInstructions: [],
+      schemeDefenseInstructions: [],
+      schemeTransitionInstructions: [],
     };
+
+    // ゲームクロック・ショットクロック・ファウル・アロー・スタッツをリセット
+    this.gameClock.reset();
+    this.shotClock.reset(24);
+    this.foulManager.reset();
+    this.possessionArrow.reset();
+    this.possessionArrow.setTipOffResult(initialPossession);
+    this.boxScore.reset();
+    this.playByPlay.reset();
+    this.timeoutManager.reset();
+    // ティップオフのログ
+    this.logEvent('tipoff', `Tip off — Team ${initialPossession === 0 ? 'A' : 'B'} possession`, initialPossession);
 
     // possession に基づいて aliases を設定
     applyPossessionAliases(this.state);
@@ -373,42 +523,36 @@ export class TrackingSimulation3D {
 
   /**
    * 攻守交替後のリセット処理（デッドボール）。
-   * 新オフェンスをバックコート位置にスポーンし、新ディフェンスを守備位置にリセット。
+   *
+   * 修正 (Phase H.6 後): 位置テレポートを撤廃。選手は現在地から自然にトランジット移動する。
+   * Phase H.6 でシュート頻度が増えポゼッション切替が頻発した結果、
+   * 旧テレポート挙動が「ワープ」として目視されていた。
+   *
+   * 速度ゼロリセット + トランジットフラグ + facing 切替のみ実施。
+   * 位置リセットは initState 時とゲーム開始時のみ行う。
    */
   private resetAfterPossessionSwitch(): void {
     const s = this.state;
-    // 新オフェンスをトランジットモードに
+    // 新オフェンスをトランジットモードに (moveTransitToHome がホーム位置へ徐々に移動)
     for (let i = 0; i < s.offenseInTransit.length; i++) s.offenseInTransit[i] = true;
-    // 新オフェンスの速度リセット
+    // 新オフェンスの速度リセット (前ポゼッションでの慣性を消す)
     s.launcher.vx = 0; s.launcher.vz = 0;
-    for (const t of s.targets) { t.vx = 0; t.vz = 0; }
-    // 新ディフェンスの速度リセット
-    for (const o of s.obstacles) { o.vx = 0; o.vz = 0; }
-
-    // 新オフェンスをバックコート位置にスポーン
-    const spawnBaseZ = s.zSign * SPAWN_BASELINE_Z;
-    const spawnPaintZMin = s.zSign * SPAWN_PAINT_Z_MIN;
-    const spawnPaintZMax = s.zSign * SPAWN_PAINT_Z_MAX;
-    const offenseFacing = Math.atan2(s.zSign, 0); // ゴール方向を向く
-    s.launcher.x = 0;
-    s.launcher.z = spawnBaseZ;
     s.launcher.speed = LAUNCHER_SPEED;
-    s.launcher.facing = offenseFacing;
-    for (let i = 0; i < s.targets.length; i++) {
-      s.targets[i].x = (Math.random() * 2 - 1) * SPAWN_PAINT_X_HALF;
-      s.targets[i].z = spawnPaintZMin + Math.random() * (spawnPaintZMax - spawnPaintZMin);
-      s.targets[i].speed = TARGET_RANDOM_SPEED;
-      s.targets[i].facing = offenseFacing;
+    for (const t of s.targets) { t.vx = 0; t.vz = 0; t.speed = TARGET_RANDOM_SPEED; }
+    // 新ディフェンスの速度リセット
+    for (let oi = 0; oi < s.obstacles.length; oi++) {
+      s.obstacles[oi].vx = 0; s.obstacles[oi].vz = 0;
+      s.obstacles[oi].speed = OB_CONFIGS[oi].idleSpeed;
     }
 
-    // 新ディフェンスを守備位置にスポーン（facing をオフェンス方向に向ける）
-    const defenseFacing = Math.atan2(-s.zSign, 0); // 自陣ゴール方向（オフェンス側を見る）
-    for (let oi = 0; oi < s.obstacles.length; oi++) {
-      s.obstacles[oi].x = INIT_OBSTACLES[oi].x;
-      s.obstacles[oi].z = INIT_OBSTACLES[oi].z * s.zSign;
-      s.obstacles[oi].speed = OB_CONFIGS[oi].idleSpeed;
-      s.obstacles[oi].facing = defenseFacing;
-      s.obstacles[oi].neckFacing = defenseFacing;
+    // facing のみ更新 (位置は維持)
+    const offenseFacing = Math.atan2(s.zSign, 0); // 攻撃ゴール方向
+    const defenseFacing = Math.atan2(-s.zSign, 0); // オフェンス側を見る
+    s.launcher.facing = offenseFacing;
+    for (const t of s.targets) t.facing = offenseFacing;
+    for (const ob of s.obstacles) {
+      ob.facing = defenseFacing;
+      ob.neckFacing = defenseFacing;
     }
 
     // DF スキャン状態をフレッシュに初期化（チーム間非対称性を排除）
@@ -417,6 +561,103 @@ export class TrackingSimulation3D {
     s.onBallEntityIdx = 0;
     s.selectedReceiverEntityIdx = 1;
     resetAfterResult(s);
+  }
+
+  /** UI 表示用のイベントメッセージをセット (5秒表示、中央オーバーレイにも表示) */
+  private setLastEvent(message: string): void {
+    this.state.lastEventMessage = message;
+    this.state.lastEventTimer = 5.0;
+  }
+
+  /** プレイバイプレイログにイベントを追加 */
+  private logEvent(kind: PlayEventKind, text: string, team?: 0 | 1): void {
+    this.playByPlay.add({
+      period: this.gameClock.getPeriod(),
+      remaining: this.gameClock.getRemainingSeconds(),
+      kind,
+      text,
+      team,
+    });
+  }
+
+  /** ターンオーバー処理: ボール無効化 + ポゼッション交代 + クロックリセット */
+  private handleTurnover(culpritAbsIdx: number = -1): void {
+    const s = this.state;
+    // Phase G.3: ボックススコアにターンオーバー記録 (-1 ならチーム代表として onBall プレイヤー)
+    const idx = culpritAbsIdx >= 0 ? culpritAbsIdx : s.offenseBase + s.onBallEntityIdx;
+    if (idx >= 0 && idx < 10) {
+      this.boxScore.addTurnover(idx);
+    }
+    deactivateBall(s, this.ball, this.ballTrailPositions);
+    resetAfterResult(s);
+    switchPossession(s);
+    this.resetAfterPossessionSwitch();
+    this.intentManager.reset();
+    this.shotClock.reset(24);
+    resetViolationsOnPossessionChange(s.violationState);
+    s.possessionStartTime = s.simTimeAccum;
+    s.cooldown = 2.0;
+  }
+
+  /**
+   * 直近で block アクション中のディフェンスを探す。
+   * シュート完了直後の判定で、ディフェンスがブロック試行していたかを返す。
+   * @returns block中のディフェンスの絶対インデックス。なければ -1
+   */
+  private findRecentBlocker(): number {
+    const s = this.state;
+    for (let oi = 0; oi < s.obstacles.length; oi++) {
+      const absIdx = s.defenseBase + oi;
+      const action = s.actionStates[absIdx];
+      if (action?.type === 'block' &&
+          (action.phase === 'startup' || action.phase === 'active' || action.phase === 'recovery')) {
+        return absIdx;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * シューティングファウルを発生させ、FT を解決する。
+   * AND-1 (shotMade=true) なら 1 本のみ。FT 後に freeze するかは呼び出し側で決定。
+   */
+  private triggerShootingFoul(
+    defenderAbsIdx: number,
+    pointValue: 2 | 3,
+    shotMade: boolean,
+    shooterTeam: 0 | 1,
+    triggerFreeze: boolean,
+  ): { made: number; attempts: number; foulOut: boolean; bonus: boolean } {
+    const s = this.state;
+    const attempts = getShootingFoulFreeThrowAttempts(pointValue, shotMade);
+    const period = this.gameClock.getPeriod();
+    const remaining = this.gameClock.getRemainingSeconds();
+    const result = this.foulManager.recordFoul(defenderAbsIdx, 'shooting', period, remaining);
+    // Phase H.4.4: シューターの ability から FT 確率を計算
+    const shooter = s.lastShooterAbsIdx >= 0 ? s.allPlayers[s.lastShooterAbsIdx] : null;
+    const ftProb = shooter?.ability
+      ? computeFreeThrowProbability(shooter.ability)
+      : computeFreeThrowProbability(DEFAULT_ABILITY);
+    const ft = resolveFreeThrows(attempts, ftProb);
+    s.teamScores[shooterTeam] += ft.made;
+    // Phase G.3: ボックススコアに反映 (PF + FT)
+    this.boxScore.addPersonalFoul(defenderAbsIdx);
+    if (s.lastShooterAbsIdx >= 0) {
+      this.boxScore.addFreeThrowAttempts(s.lastShooterAbsIdx, ft.made, ft.attempts);
+    }
+    const foulOutTag = result.foulOut ? ' [FOUL OUT]' : '';
+    const bonusTag = result.bonus ? ' [BONUS]' : '';
+    this.setLastEvent(`Shooting Foul PL${defenderAbsIdx}${foulOutTag}${bonusTag} → FT ${ft.made}/${ft.attempts}`);
+    this.logEvent('foul', `Shooting foul on PL${defenderAbsIdx}${foulOutTag}${bonusTag}`, defenderAbsIdx < 5 ? 0 : 1);
+    this.logEvent('free-throw', `PL${s.lastShooterAbsIdx} FT ${ft.made}/${ft.attempts}`, shooterTeam);
+    if (result.foulOut) {
+      this.logEvent('foul-out', `PL${defenderAbsIdx} fouled out`, defenderAbsIdx < 5 ? 0 : 1);
+    }
+    if (triggerFreeze) {
+      s.freezeDuringFreeThrow = true;
+      s.freeThrowResolveTimer = TrackingSimulation3D.FT_RESOLVE_PAUSE_SEC;
+    }
+    return { made: ft.made, attempts: ft.attempts, foulOut: result.foulOut, bonus: result.bonus };
   }
 
   /** DF スキャン状態・弾きクールダウンを初期値にリセット */
@@ -620,6 +861,174 @@ export class TrackingSimulation3D {
   private update(dt: number): void {
     const s = this.state;
 
+    // === 試合終了済 → 全て凍結 ===
+    if (this.gameClock.isGameOver()) {
+      return;
+    }
+
+    // === イベントメッセージタイマー減衰 ===
+    if (s.lastEventTimer > 0) {
+      s.lastEventTimer -= dt;
+      if (s.lastEventTimer < 0) s.lastEventTimer = 0;
+    }
+
+    // === 累積シミュレーション時間 (アシスト窓判定用) ===
+    s.simTimeAccum += dt;
+
+    // === Phase H.4.1: 戦術プライオリティ評価 (毎フレーム) ===
+    const tactical = evaluateTacticalPriority({
+      state: s,
+      shotClockRemaining: this.shotClock.getRemainingSeconds(),
+      possessionAge: s.simTimeAccum - s.possessionStartTime,
+      inTransition: s.offenseInTransit.some(t => t),
+    });
+    s.tacticalMode = tactical.mode;
+    s.tacticalReason = tactical.reason;
+
+    // === Phase H.5: Scheme 選択 + 実行 ===
+    const prevOffense = s.activeOffenseSchemeId;
+    const prevTransition = s.activeTransitionSchemeId;
+    this.activeSchemes = runSchemes(s, s.simTimeAccum, this.shotClock.getRemainingSeconds());
+    s.activeOffenseSchemeId = this.activeSchemes.offenseScheme?.id ?? null;
+    s.activeDefenseSchemeId = this.activeSchemes.defenseScheme?.id ?? null;
+    s.activeTransitionSchemeId = this.activeSchemes.transitionScheme?.id ?? null;
+    s.schemeOffenseInstructions = this.activeSchemes.offenseInstructions;
+    s.schemeDefenseInstructions = this.activeSchemes.defenseInstructions;
+    s.schemeTransitionInstructions = this.activeSchemes.transitionInstructions;
+    // Phase H.6: scheme 切替を画面イベントとして可視化
+    if (s.activeOffenseSchemeId !== prevOffense && s.activeOffenseSchemeId && this.activeSchemes.offenseScheme) {
+      this.setLastEvent(`▶ ${this.activeSchemes.offenseScheme.displayName}`);
+    } else if (s.activeTransitionSchemeId !== prevTransition && s.activeTransitionSchemeId && this.activeSchemes.transitionScheme) {
+      this.setLastEvent(`⚡ ${this.activeSchemes.transitionScheme.displayName}`);
+    }
+
+    // カット状態のタイマー減衰 + 新規カットトリガー検知
+    for (let ri = 1; ri < 5; ri++) {
+      const cut = s.cutStates[ri];
+      if (cut.remainingTime > 0) {
+        cut.remainingTime -= dt;
+        if (cut.remainingTime <= 0) cut.skillId = '';
+      } else if (s.tacticalMode === 'team' || s.tacticalMode === 'individual') {
+        // オフボール選手のカット評価 (オンボール除外)
+        const offAbsIdx = s.offenseBase + ri;
+        if (offAbsIdx !== s.offenseBase + s.onBallEntityIdx) {
+          const target = s.targets[ri - 1];
+          const cutTrigger = evaluateCutForOffBall(target, s, s.simTimeAccum, this.shotClock.getRemainingSeconds());
+          if (cutTrigger) {
+            cut.skillId = cutTrigger.skillId;
+            cut.dest = cutTrigger.dest;
+            cut.remainingTime = cutTrigger.duration;
+          }
+        }
+      }
+    }
+
+    // === FT 解決中の停止 (シューティングファウル後) ===
+    if (s.freezeDuringFreeThrow) {
+      s.freeThrowResolveTimer -= dt;
+      if (s.freeThrowResolveTimer <= 0) {
+        s.freezeDuringFreeThrow = false;
+        s.freeThrowResolveTimer = 0;
+        // FT 後はディフェンス側にボール (defense rebound 想定簡略化)
+        deactivateBall(s, this.ball, this.ballTrailPositions);
+        resetAfterResult(s);
+        switchPossession(s);
+        this.resetAfterPossessionSwitch();
+        this.intentManager.reset();
+        this.shotClock.reset(24);
+        resetViolationsOnPossessionChange(s.violationState);
+        s.cooldown = 2.0;
+      }
+      return;
+    }
+
+    // === クォーター/OT 終了後の自動再開待機 ===
+    if (s.periodTransitionTimer > 0) {
+      s.periodTransitionTimer -= dt;
+      if (s.periodTransitionTimer <= 0) {
+        s.periodTransitionTimer = 0;
+        const result = this.gameClock.startNextPeriod(s.teamScores);
+        if (result.isGameOver) {
+          // 試合終了ログ
+          const winner = s.teamScores[0] > s.teamScores[1] ? 'Team A' :
+            s.teamScores[1] > s.teamScores[0] ? 'Team B' : 'Draw';
+          this.setLastEvent(`GAME OVER — ${winner} (${s.teamScores[0]}-${s.teamScores[1]})`);
+          this.logEvent('period-end', `GAME OVER — ${winner} (${s.teamScores[0]}-${s.teamScores[1]})`);
+          return;
+        }
+        // 新クォーター開始: ファウルカウンタ更新、ポゼッション交代、コートリセット
+        this.foulManager.startNewPeriod();
+        deactivateBall(s, this.ball, this.ballTrailPositions);
+        resetAfterResult(s);
+        switchPossession(s);
+        this.resetAfterPossessionSwitch();
+        this.intentManager.reset();
+        this.shotClock.reset(24);
+        resetViolationsOnPossessionChange(s.violationState);
+        s.cooldown = 2.0;
+        this.logEvent('period-start', `${result.period} start`, s.possession);
+      }
+      return;
+    }
+
+    // === ゲームクロック tick ===
+    const clockEvent = this.gameClock.tick(dt);
+    if (clockEvent && clockEvent.type === 'period-end') {
+      // クォーター/OT 終了 → 待機タイマー開始
+      this.shotClock.stop();
+      s.periodTransitionTimer = TrackingSimulation3D.PERIOD_TRANSITION_PAUSE_SEC;
+      this.setLastEvent(`${clockEvent.period} END — A ${s.teamScores[0]}-${s.teamScores[1]} B  (4s break)`);
+      this.logEvent('period-end', `${clockEvent.period} end (A ${s.teamScores[0]}-${s.teamScores[1]} B)`);
+      // ボール飛行中なら強制停止
+      deactivateBall(s, this.ball, this.ballTrailPositions);
+      return;
+    }
+
+    // === ショットクロック tick (ボール保持中のみカウント) ===
+    // 飛行中・ルーズボール中はショットクロック停止
+    const ballHeldByOffense = !s.ballActive && !s.looseBall && s.goalScoredTimer <= 0;
+    if (ballHeldByOffense) {
+      this.shotClock.resume();
+    } else {
+      this.shotClock.pause();
+    }
+    const shotClockViolation = this.shotClock.tick(dt);
+    if (shotClockViolation) {
+      // 24 秒バイオレーション → ターンオーバー
+      this.setLastEvent('24-Second Violation');
+      this.logEvent('violation', '24-second violation', s.possession);
+      this.handleTurnover();
+      return;
+    }
+
+    // === Phase G.2: バイオレーション検知 (3秒・8秒バックコート) ===
+    if (ballHeldByOffense) {
+      const offensePositions = [
+        { x: s.launcher.x, z: s.launcher.z },
+        ...s.targets.map(t => ({ x: t.x, z: t.z })),
+      ];
+      const violationResult = tickViolations(
+        s.violationState,
+        offensePositions,
+        s.onBallEntityIdx,
+        s.attackGoalZ,
+        dt,
+      );
+      if (violationResult.threeSecondViolatorRelIdx >= 0) {
+        const absIdx = s.offenseBase + violationResult.threeSecondViolatorRelIdx;
+        this.setLastEvent(`3-Second Violation: PL${absIdx}`);
+        this.logEvent('violation', `3-second violation on PL${absIdx}`, s.possession);
+        this.handleTurnover(absIdx);
+        return;
+      }
+      if (violationResult.backcourtViolation) {
+        this.setLastEvent('8-Second Backcourt Violation');
+        this.logEvent('violation', '8-second backcourt violation', s.possession);
+        this.handleTurnover();
+        return;
+      }
+    }
+
     // === ゴール成功後の遅延リセット ===
     if (s.goalScoredTimer > 0) {
       s.goalScoredTimer -= dt;
@@ -632,6 +1041,8 @@ export class TrackingSimulation3D {
         switchPossession(s);
         this.resetAfterPossessionSwitch();
         this.intentManager.reset();
+        this.shotClock.reset(24);
+        resetViolationsOnPossessionChange(s.violationState);
         s.cooldown = 2.0;
       }
       return; // タイマー中は他の処理をスキップ
@@ -870,6 +1281,7 @@ export class TrackingSimulation3D {
             const scorerCtx = buildOnBallContext(
               s, evalResult.preFire, evalResult.selectedTargetIdx,
               receiverEntityIndices, receiverRoles, ctx, this.intentManager,
+              this.shotClock.getRemainingSeconds(),
             );
             const scorerResult = evaluateActions(scorerCtx);
             s.lastScorerResult = scorerResult;
@@ -933,12 +1345,18 @@ export class TrackingSimulation3D {
           for (let i = 0; i < s.actionStates.length; i++) s.actionStates[i] = createIdleAction();
 
           if (lbResult.isOffenseRecovery) {
-            // オフェンスがルーズボール回収 → possession 維持
+            // オフェンスがルーズボール回収 → possession 維持、ショットクロック 14 秒リセット
             resetAfterResult(s);
             s.onBallEntityIdx = lbResult.recoveredEntityIdx;
             s.cooldown = 1.5;
             for (let i = 0; i < s.offenseInTransit.length; i++) s.offenseInTransit[i] = true;
             this.intentManager.reset();
+            this.shotClock.reset(14);
+            // Phase G.3: オフェンスリバウンド記録
+            const recovererAbsOff = s.offenseBase + lbResult.recoveredEntityIdx;
+            this.boxScore.addRebound(recovererAbsOff, true);
+            this.setLastEvent(`Offensive Rebound — PL${recovererAbsOff} (offense keeps ball, shot clock 14s)`);
+            this.logEvent('rebound', `PL${recovererAbsOff} offensive rebound`, s.possession);
           } else {
             // ディフェンスがルーズボール回収 → ライブターンオーバー
             s.score.steal++;
@@ -956,6 +1374,14 @@ export class TrackingSimulation3D {
             // ファストブレイク: 位置リセットなし、トランジットモードで新ロールへ
             for (let i = 0; i < s.offenseInTransit.length; i++) s.offenseInTransit[i] = true;
             this.intentManager.reset();
+            this.shotClock.reset(24);
+            resetViolationsOnPossessionChange(s.violationState);
+            // Phase G.3: ディフェンスリバウンドとして記録
+            // (loose ball は missed shot からも deflected pass からも来うるが簡略化)
+            const recovererAbsDef = absIdx;
+            this.boxScore.addRebound(recovererAbsDef, false);
+            this.setLastEvent(`Defensive Rebound / Steal — PL${recovererAbsDef} (possession switches)`);
+            this.logEvent('rebound', `PL${recovererAbsDef} defensive rebound`, recovererAbsDef < 5 ? 0 : 1);
           }
         }
       } else if (s.interceptPt) {
@@ -976,7 +1402,14 @@ export class TrackingSimulation3D {
         const pfResult = updatePassFlight(s, ballPos, this.ball.isInFlight(), dt, allHandsPF);
 
         if (pfResult.deflectedToLoose) {
-          if (pfResult.deflectImpulse) this.ball.applyImpulse(pfResult.deflectImpulse);
+          if (pfResult.deflectImpulse) {
+            this.ball.applyImpulse(pfResult.deflectImpulse);
+            this.setLastEvent('Pass Deflected → Loose Ball (rebound contest)');
+            this.logEvent('block', 'Pass deflected by defender → loose ball', s.possession);
+          } else {
+            this.setLastEvent('Pass Landed → Loose Ball (rebound contest)');
+            this.logEvent('turnover', 'Pass landed, no catch → loose ball', s.possession);
+          }
           s.looseBall = true;
         } else if (pfResult.completed) {
           deactivateBall(s, this.ball, this.ballTrailPositions);
@@ -985,13 +1418,26 @@ export class TrackingSimulation3D {
           if (pfResult.result === 'hit') {
             s.actionStates[s.offenseBase + pfResult.hitReceiverEntityIdx] = startAction('catch', CATCH_TIMING);
             this.catchHoldInfo = { entityIdx: pfResult.hitReceiverEntityIdx };
+            // Phase G.3: アシスト判定用にパス情報を記録
+            s.lastPassInfo = {
+              passerAbsIdx: s.offenseBase + s.onBallEntityIdx,
+              receiverAbsIdx: s.offenseBase + pfResult.hitReceiverEntityIdx,
+              timeOfPass: s.simTimeAccum,
+            };
           }
           if (pfResult.result === 'miss') {
             // パスミス → 攻守交替
+            // Phase G.3: パスミス = ターンオーバー
+            const passerAbs = s.offenseBase + s.onBallEntityIdx;
+            this.boxScore.addTurnover(passerAbs);
+            this.setLastEvent(`Pass Out of Bounds — PL${passerAbs} turnover, possession to other team`);
+            this.logEvent('turnover', `PL${passerAbs} pass OOB/timeout turnover`, s.possession);
             switchPossession(s);
             s.onBallEntityIdx = 0;
             this.resetAfterPossessionSwitch();
             this.intentManager.reset();
+            this.shotClock.reset(24);
+            resetViolationsOnPossessionChange(s.violationState);
           }
 
           for (let i = 0; i < s.actionStates.length; i++) {
@@ -1024,7 +1470,36 @@ export class TrackingSimulation3D {
 
         // allHands を計算してブロック判定に渡す
         const allHandsSF = this.remapHandsToMoverOrder(this.vis.getHandWorldPositions(s.allPlayers));
-        const sfResult = updateShotFlight(s, ballPos, this.ball.isInFlight(), dt, allHandsSF);
+
+        // Phase G.2: ゴールテンディング検知 (ボール下降中 & リム高以上 & ディフェンス手接触)
+        const obVisStartSF = 1 + s.targets.length;
+        const defenderHandsSF = allHandsSF.slice(obVisStartSF, obVisStartSF + s.obstacles.length);
+        const goaltendingDetected = ballPos.y >= GOAL_RIM_Y && checkGoaltending({
+          ballX: ballPos.x,
+          ballY: ballPos.y,
+          ballZ: ballPos.z,
+          prevBallY: s.prevBallY,
+          defenderHands: defenderHandsSF.map(h => ({
+            left: { x: h.left.x, y: h.left.y, z: h.left.z },
+            right: { x: h.right.x, y: h.right.y, z: h.right.z },
+          })),
+        });
+
+        let sfResult;
+        if (goaltendingDetected) {
+          // ゴールテンディング → バスケット成立扱い (得点 + 待機)
+          sfResult = {
+            completed: true,
+            scored: true,
+            blocked: false,
+            blockDirection: null,
+            missToLoose: false,
+          };
+          this.setLastEvent('Goaltending — basket awarded');
+          this.logEvent('goaltending', `Goaltending — basket awarded to PL${s.lastShooterAbsIdx}`, s.possession);
+        } else {
+          sfResult = updateShotFlight(s, ballPos, this.ball.isInFlight(), dt, allHandsSF);
+        }
 
         if (sfResult.blocked && sfResult.blockDirection) {
           // ショットブロック成功 → ルーズボール遷移
@@ -1034,34 +1509,107 @@ export class TrackingSimulation3D {
           s.interceptPt = null;
           for (let i = 0; i < s.actionStates.length; i++) s.actionStates[i] = createIdleAction();
           for (let i = 0; i < s.moveDistAccum.length; i++) s.moveDistAccum[i] = 0;
+          // Phase G.3: ブロック記録
+          const blockerAbs = this.findRecentBlocker();
+          if (blockerAbs >= 0) {
+            this.boxScore.addBlock(blockerAbs);
+            this.logEvent('block', `PL${blockerAbs} blocks PL${s.lastShooterAbsIdx}`, blockerAbs < 5 ? 0 : 1);
+          }
+          const releasePosBlock = s.lastShotReleasePos;
+          const pointValueBlock: 2 | 3 = releasePosBlock
+            ? getShotPointValue(releasePosBlock.x, releasePosBlock.z, s.attackGoalX, s.attackGoalZ)
+            : 2;
+          if (s.lastShooterAbsIdx >= 0) {
+            this.boxScore.addFieldGoalAttempt(s.lastShooterAbsIdx, false, pointValueBlock === 3);
+          }
         } else if (sfResult.missToLoose) {
-          // シュートミス（着地） → ルーズボール遷移（リバウンド争い）
-          s.score.shotMiss++;
-          s.looseBall = true;
-          s.interceptPt = null;
-          s.ballAge = 0;  // grace period 用にリセット
-          for (let i = 0; i < s.actionStates.length; i++) s.actionStates[i] = createIdleAction();
-          for (let i = 0; i < s.moveDistAccum.length; i++) s.moveDistAccum[i] = 0;
-          resetAfterResult(s);
+          // Phase G.3: シュート試投 (miss) を box score に記録
+          const releasePos = s.lastShotReleasePos;
+          const pointValueMiss: 2 | 3 = releasePos
+            ? getShotPointValue(releasePos.x, releasePos.z, s.attackGoalX, s.attackGoalZ)
+            : 2;
+          const shooterAbsMiss = s.lastShooterAbsIdx;
+          if (shooterAbsMiss >= 0) {
+            this.boxScore.addFieldGoalAttempt(shooterAbsMiss, false, pointValueMiss === 3);
+          }
+          this.logEvent('shot-missed', `PL${shooterAbsMiss} misses ${pointValueMiss}P`, s.possession);
+          // Phase G.2: ミスシュート + ブロック試行ディフェンス → 確率でシューティングファウル
+          const blockerAbsIdx = this.findRecentBlocker();
+          if (blockerAbsIdx >= 0 && Math.random() < TrackingSimulation3D.SHOOTING_FOUL_PROB) {
+            // シューティングファウル: ルーズボール経由せず FT へ
+            s.score.shotMiss++;
+            deactivateBall(s, this.ball, this.ballTrailPositions);
+            for (let i = 0; i < s.actionStates.length; i++) s.actionStates[i] = createIdleAction();
+            for (let i = 0; i < s.moveDistAccum.length; i++) s.moveDistAccum[i] = 0;
+            resetAfterResult(s);
+            this.triggerShootingFoul(blockerAbsIdx, pointValueMiss, false, s.possession, true);
+          } else {
+            // 通常のミス → ルーズボール遷移（リバウンド争い）
+            s.score.shotMiss++;
+            s.looseBall = true;
+            s.interceptPt = null;
+            s.ballAge = 0;  // grace period 用にリセット
+            for (let i = 0; i < s.actionStates.length; i++) s.actionStates[i] = createIdleAction();
+            for (let i = 0; i < s.moveDistAccum.length; i++) s.moveDistAccum[i] = 0;
+            resetAfterResult(s);
+          }
         } else if (sfResult.completed) {
           if (sfResult.scored) {
-            // ゴール成功 → ボールを残したまま遅延リセット開始
+            // ゴール成功 → 2P/3P 判定し加点、ボールを残したまま遅延リセット開始
+            const releasePos = s.lastShotReleasePos;
+            const pointValue: 2 | 3 = releasePos
+              ? getShotPointValue(releasePos.x, releasePos.z, s.attackGoalX, s.attackGoalZ)
+              : 2;
             s.score.goal++;
-            s.teamScores[s.possession]++;
+            s.teamScores[s.possession] += pointValue;
+            s.lastShotPoints = pointValue;
             s.goalScoredTimer = 2.0;  // 2秒後にリセット
             for (let i = 0; i < s.actionStates.length; i++) s.actionStates[i] = createIdleAction();
             for (let i = 0; i < s.moveDistAccum.length; i++) s.moveDistAccum[i] = 0;
+            // Phase G.3: ボックススコア + アシスト + ログ
+            const shooterAbs = s.lastShooterAbsIdx;
+            if (shooterAbs >= 0) {
+              this.boxScore.addFieldGoalAttempt(shooterAbs, true, pointValue === 3);
+            }
+            // アシスト判定: 3秒以内のパス成功でレシーバー == シューター
+            if (s.lastPassInfo &&
+                s.lastPassInfo.receiverAbsIdx === shooterAbs &&
+                s.simTimeAccum - s.lastPassInfo.timeOfPass < TrackingSimulation3D.ASSIST_WINDOW_SEC) {
+              this.boxScore.addAssist(s.lastPassInfo.passerAbsIdx);
+              this.logEvent('assist', `PL${s.lastPassInfo.passerAbsIdx} assist → PL${shooterAbs}`, s.possession);
+              s.lastPassInfo = null;
+            }
+            this.logEvent('shot-made',
+              `PL${shooterAbs} makes ${pointValue}P (A ${s.teamScores[0]}-${s.teamScores[1]} B)`,
+              s.possession);
+            // Phase G.2: AND-1 判定 (made shot + block 試行中 → 確率でファウル)
+            const blockerAbsIdx = this.findRecentBlocker();
+            if (blockerAbsIdx >= 0 && Math.random() < TrackingSimulation3D.SHOOTING_FOUL_PROB) {
+              this.triggerShootingFoul(blockerAbsIdx, pointValue, true, s.possession, false);
+            }
           } else {
             // OOB/タイムアウト → デッドボールリセット
             deactivateBall(s, this.ball, this.ballTrailPositions);
             s.score.shotMiss++;
+            // Phase G.3: OOB のシュート試投ミスもボックススコアに記録
+            const releasePosOOB = s.lastShotReleasePos;
+            const pointValueOOB: 2 | 3 = releasePosOOB
+              ? getShotPointValue(releasePosOOB.x, releasePosOOB.z, s.attackGoalX, s.attackGoalZ)
+              : 2;
+            if (s.lastShooterAbsIdx >= 0) {
+              this.boxScore.addFieldGoalAttempt(s.lastShooterAbsIdx, false, pointValueOOB === 3);
+            }
             for (let i = 0; i < s.actionStates.length; i++) s.actionStates[i] = createIdleAction();
             for (let i = 0; i < s.moveDistAccum.length; i++) s.moveDistAccum[i] = 0;
             resetAfterResult(s);
             switchPossession(s);
             this.resetAfterPossessionSwitch();
             this.intentManager.reset();
+            this.shotClock.reset(24);
+            resetViolationsOnPossessionChange(s.violationState);
             s.cooldown = 2.0;
+            this.setLastEvent('Out of Bounds');
+            this.logEvent('out-of-bounds', `Ball out of bounds`, s.possession);
           }
         }
       }

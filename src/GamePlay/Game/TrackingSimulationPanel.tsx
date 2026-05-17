@@ -15,6 +15,9 @@ import { Field } from '@/GamePlay/Object/Entities/Field';
 import { Ball } from '@/GamePlay/Object/Entities/Ball';
 import { PhysicsManager } from '@/GamePlay/Object/Physics/PhysicsManager';
 import { TrackingSimulation3D } from './TrackingSimulation3D';
+import type { PlayerStats } from './GameRules/BoxScore';
+import type { PlayEvent } from './GameRules/PlayByPlayLog';
+import { PlayByPlayLog } from './GameRules/PlayByPlayLog';
 
 /**
  * 追跡シミュレーション スタンドアロンコンポーネント
@@ -29,6 +32,29 @@ export function TrackingSimulationPanel() {
   const [score, setScore] = useState({ hit: 0, block: 0, miss: 0, steal: 0, goal: 0, shotMiss: 0 });
   const [teamScores, setTeamScores] = useState<[number, number]>([0, 0]);
   const [possession, setPossession] = useState<0 | 1>(0);
+  const [clockInfo, setClockInfo] = useState<{
+    period: string;
+    gameTime: string;
+    shotTime: string;
+    lastShotPoints: 0 | 2 | 3;
+    gameOver: boolean;
+    teamFoulsA: number;
+    teamFoulsB: number;
+    bonusA: boolean;
+    bonusB: boolean;
+    lastEvent: string;
+    tacticalMode: 'team' | 'individual' | 'transition';
+    tacticalReason: string;
+    offenseSchemeName: string;
+    defenseSchemeName: string;
+    transitionSchemeName: string;
+    activeCuts: { entityIdx: number; skillId: string; remainingTime: number }[];
+  }>({
+    period: 'Q1', gameTime: '12:00', shotTime: '24.0', lastShotPoints: 0, gameOver: false,
+    teamFoulsA: 0, teamFoulsB: 0, bonusA: false, bonusB: false, lastEvent: '',
+    tacticalMode: 'team', tacticalReason: '',
+    offenseSchemeName: '', defenseSchemeName: '', transitionSchemeName: '', activeCuts: [],
+  });
   const [ready, setReady] = useState(false);
   const [overlayVis, setOverlayVis] = useState<{ global: boolean; entities: boolean[]; actionGauge: boolean }>({
     global: false,
@@ -36,6 +62,11 @@ export function TrackingSimulationPanel() {
     actionGauge: true,
   });
   const [panelOpen, setPanelOpen] = useState(false);
+  const [boxScoreOpen, setBoxScoreOpen] = useState(false);
+  const [playByPlayOpen, setPlayByPlayOpen] = useState(false);
+  const [boxStats, setBoxStats] = useState<PlayerStats[]>([]);
+  const [pbpEvents, setPbpEvents] = useState<PlayEvent[]>([]);
+  const [timeouts, setTimeouts] = useState<[number, number]>([7, 7]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -112,6 +143,33 @@ export function TrackingSimulationPanel() {
           setScore(sim.getScore());
           setTeamScores(sim.getTeamScores());
           setPossession(sim.getPossession());
+          const gc = sim.getGameClock();
+          const sc = sim.getShotClock();
+          const fm = sim.getFoulManager();
+          const tactical = sim.getTacticalMode();
+          const schemes = sim.getActiveSchemes();
+          setClockInfo({
+            period: gc.getPeriod(),
+            gameTime: gc.getDisplayTime(),
+            shotTime: sc.getDisplayTime(),
+            lastShotPoints: sim.getLastShotPoints(),
+            gameOver: gc.isGameOver(),
+            teamFoulsA: fm.getTeamFoulsThisPeriod(0),
+            teamFoulsB: fm.getTeamFoulsThisPeriod(1),
+            bonusA: fm.isInBonus(0),
+            bonusB: fm.isInBonus(1),
+            lastEvent: sim.getLastEventMessage(),
+            tacticalMode: tactical.mode,
+            tacticalReason: tactical.reason,
+            offenseSchemeName: schemes.offense?.name ?? '',
+            defenseSchemeName: schemes.defense?.name ?? '',
+            transitionSchemeName: schemes.transition?.name ?? '',
+            activeCuts: schemes.activeCuts,
+          });
+          setBoxStats(sim.getBoxScore().getAllStats());
+          setPbpEvents(sim.getPlayByPlay().getRecent(20));
+          const tm = sim.getTimeoutManager();
+          setTimeouts([tm.getRemaining(0), tm.getRemaining(1)]);
         }, 200);
 
         setReady(true);
@@ -143,6 +201,15 @@ export function TrackingSimulationPanel() {
       setScore({ hit: 0, block: 0, miss: 0, steal: 0, goal: 0, shotMiss: 0 });
       setTeamScores([0, 0]);
       setPossession(0);
+      setClockInfo({
+        period: 'Q1', gameTime: '12:00', shotTime: '24.0', lastShotPoints: 0, gameOver: false,
+        teamFoulsA: 0, teamFoulsB: 0, bonusA: false, bonusB: false, lastEvent: '',
+        tacticalMode: 'team', tacticalReason: '',
+        offenseSchemeName: '', defenseSchemeName: '', transitionSchemeName: '', activeCuts: [],
+      });
+      setBoxStats([]);
+      setPbpEvents([]);
+      setTimeouts([7, 7]);
     }
   };
 
@@ -187,6 +254,20 @@ export function TrackingSimulationPanel() {
 
   return (
     <div className="w-full h-screen relative bg-gray-900">
+      {/* Center-screen event overlay (常時表示、メッセージあるときのみ可視) */}
+      {ready && clockInfo.lastEvent && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+          <div className="bg-black/80 border-2 border-yellow-400 rounded-lg px-6 py-3 shadow-2xl backdrop-blur-sm">
+            <div className="text-yellow-300 text-xs font-bold tracking-wider uppercase mb-1">
+              {clockInfo.period} {clockInfo.gameTime}
+            </div>
+            <div className="text-white text-lg font-bold whitespace-nowrap">
+              {clockInfo.lastEvent}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 3D Canvas */}
       <canvas
         ref={canvasRef}
@@ -213,6 +294,144 @@ export function TrackingSimulationPanel() {
           <h3 className="text-sm font-bold text-gray-300 mb-2">
             追跡シミュレーション
           </h3>
+
+          {/* Game clock & shot clock */}
+          <div className="bg-gray-900/80 rounded-lg p-2 mb-2 flex items-center justify-between">
+            <div className="flex flex-col">
+              <span className="text-xs text-gray-400">{clockInfo.period}</span>
+              <span className="text-white font-mono text-xl font-bold">{clockInfo.gameTime}</span>
+            </div>
+            <div className="flex flex-col items-end">
+              <span className="text-xs text-gray-400">SHOT</span>
+              <span className={`font-mono text-xl font-bold ${parseFloat(clockInfo.shotTime) <= 5 ? 'text-red-400' : 'text-yellow-300'}`}>
+                {clockInfo.shotTime}
+              </span>
+            </div>
+          </div>
+          {clockInfo.gameOver && (
+            <div className="bg-yellow-600/80 text-white text-center font-bold py-1 mb-2 rounded">
+              GAME OVER {teamScores[0] > teamScores[1] ? '— TEAM A WIN' : teamScores[1] > teamScores[0] ? '— TEAM B WIN' : '— DRAW'}
+            </div>
+          )}
+          {clockInfo.lastShotPoints > 0 && (
+            <div className="text-center text-xs text-green-400 mb-1">直前のショット: {clockInfo.lastShotPoints}P</div>
+          )}
+          {clockInfo.lastEvent && (
+            <div className="text-center text-xs text-orange-300 mb-1 px-1 py-1 bg-gray-900/60 rounded">
+              {clockInfo.lastEvent}
+            </div>
+          )}
+
+          {/* Tactical mode (Phase H.4.1) + Active Schemes (Phase H.5) */}
+          <div className="bg-gray-900/60 rounded p-1 mb-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span className={
+                clockInfo.tacticalMode === 'team' ? 'text-blue-300 font-bold' :
+                clockInfo.tacticalMode === 'individual' ? 'text-yellow-300 font-bold' :
+                'text-orange-300 font-bold'
+              }>
+                {clockInfo.tacticalMode.toUpperCase()}
+              </span>
+              <span className="text-gray-400 truncate">{clockInfo.tacticalReason}</span>
+            </div>
+            {clockInfo.transitionSchemeName && (
+              <div className="text-orange-300 mt-1">⚡ {clockInfo.transitionSchemeName}</div>
+            )}
+            {!clockInfo.transitionSchemeName && clockInfo.offenseSchemeName && (
+              <div className="text-blue-300 mt-1">▶ OFF: {clockInfo.offenseSchemeName}</div>
+            )}
+            {clockInfo.defenseSchemeName && (
+              <div className="text-red-300 mt-1">▶ DEF: {clockInfo.defenseSchemeName}</div>
+            )}
+            {clockInfo.activeCuts.length > 0 && (
+              <div className="text-green-300 mt-1">
+                ✂ Cuts: {clockInfo.activeCuts.map(c => `PL${c.entityIdx}(${c.skillId.replace('cut:', '')})`).join(', ')}
+              </div>
+            )}
+          </div>
+
+          {/* Team fouls / bonus / timeouts */}
+          <div className="flex items-center justify-between bg-gray-900/60 rounded p-1 mb-2 text-xs">
+            <span className={clockInfo.bonusA ? 'text-red-300 font-bold' : 'text-gray-400'}>
+              A: {clockInfo.teamFoulsA}F TO:{timeouts[0]}{clockInfo.bonusA ? ' (BONUS)' : ''}
+            </span>
+            <span className={clockInfo.bonusB ? 'text-red-300 font-bold' : 'text-gray-400'}>
+              B: {clockInfo.teamFoulsB}F TO:{timeouts[1]}{clockInfo.bonusB ? ' (BONUS)' : ''}
+            </span>
+          </div>
+
+          {/* Box Score / Play-by-play toggles */}
+          <div className="flex gap-1 mb-2">
+            <button
+              onClick={() => setBoxScoreOpen(v => !v)}
+              className="flex-1 text-xs bg-gray-700 hover:bg-gray-600 rounded px-2 py-1"
+            >
+              {boxScoreOpen ? '▼' : '▶'} Box Score
+            </button>
+            <button
+              onClick={() => setPlayByPlayOpen(v => !v)}
+              className="flex-1 text-xs bg-gray-700 hover:bg-gray-600 rounded px-2 py-1"
+            >
+              {playByPlayOpen ? '▼' : '▶'} Play-by-Play
+            </button>
+          </div>
+
+          {boxScoreOpen && boxStats.length > 0 && (
+            <div className="bg-gray-900/80 rounded p-2 mb-2 text-xs max-h-64 overflow-y-auto">
+              <table className="w-full text-gray-300 font-mono">
+                <thead>
+                  <tr className="text-gray-500 border-b border-gray-700">
+                    <th className="text-left">PL</th>
+                    <th>PTS</th>
+                    <th>RB</th>
+                    <th>AS</th>
+                    <th>ST</th>
+                    <th>BK</th>
+                    <th>TO</th>
+                    <th>PF</th>
+                    <th>FG</th>
+                    <th>3P</th>
+                    <th>FT</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {boxStats.map((s, i) => (
+                    <tr key={i} className={i === 4 ? 'border-b border-gray-700' : ''}>
+                      <td className={i < 5 ? 'text-blue-400' : 'text-red-400'}>{i}</td>
+                      <td className="text-center">{s.points}</td>
+                      <td className="text-center">{s.rebounds}</td>
+                      <td className="text-center">{s.assists}</td>
+                      <td className="text-center">{s.steals}</td>
+                      <td className="text-center">{s.blocks}</td>
+                      <td className="text-center">{s.turnovers}</td>
+                      <td className="text-center">{s.personalFouls}</td>
+                      <td className="text-center">{s.fgMade}/{s.fgAttempted}</td>
+                      <td className="text-center">{s.threePointMade}/{s.threePointAttempted}</td>
+                      <td className="text-center">{s.ftMade}/{s.ftAttempted}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {playByPlayOpen && pbpEvents.length > 0 && (
+            <div className="bg-gray-900/80 rounded p-2 mb-2 text-xs max-h-64 overflow-y-auto space-y-1">
+              {pbpEvents.map((e, i) => (
+                <div key={i} className="flex gap-2">
+                  <span className="text-gray-500 font-mono shrink-0">
+                    {e.period} {PlayByPlayLog.formatTime(e.remaining)}
+                  </span>
+                  <span className={
+                    e.team === 0 ? 'text-blue-300' :
+                    e.team === 1 ? 'text-red-300' : 'text-gray-300'
+                  }>
+                    {e.text}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Team scoreboard */}
           <div className="flex items-center justify-between bg-gray-900/80 rounded-lg p-2 mb-3">

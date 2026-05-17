@@ -28,9 +28,33 @@ import {
 import { updateScan } from "../Decision/ScanSystem";
 import { canEntityMove, applyMoveAction } from "./SimActionManager";
 import { OB_CONFIGS } from "../Decision/ObstacleRoleAssignment";
+import { TARGET_RANDOM_SPEED } from "../Config/EntityConfig";
+import { moveWithFacing } from "../Movement/MovementCore";
+import { getLowPostLeft, getLowPostRight } from "../Court/CourtSpots";
 
 // Re-export from ObstacleDefenseAI for backwards compatibility
 export { computePushObstructions, updateObstacleMovements } from "./ObstacleDefenseAI";
+
+/**
+ * Phase H.5: dest 指示に従って移動する。応答距離 0.15m 未満なら停止。
+ * @returns true if moved (false = within tolerance / idle)
+ */
+function applyDestMovement(
+  mover: SimMover, dest: { x: number; z: number }, speedMult: number, dt: number,
+): boolean {
+  const dx = dest.x - mover.x;
+  const dz = dest.z - mover.z;
+  const d = Math.sqrt(dx * dx + dz * dz);
+  if (d < 0.15) {
+    mover.vx = 0; mover.vz = 0;
+    return true;
+  }
+  const speed = TARGET_RANDOM_SPEED * Math.max(0.1, speedMult);
+  mover.vx = (dx / d) * speed;
+  mover.vz = (dz / d) * speed;
+  moveWithFacing(mover, speed, dt);
+  return true;
+}
 
 /**
  * ターゲットのロール別移動を実行（重複除去）
@@ -62,26 +86,66 @@ export function updateTargetRoleMovements(state: SimState, dt: number, skipIdx: 
     const prevX = targets[ti].x;
     const prevZ = targets[ti].z;
 
-    const others = getOtherTargets(ti);
-    switch (ti) {
-      case 0: {
-        const res = moveSecondHandler(
-          targets[0], state.targetDests[0], state.targetReevalTimers[0],
-          dt, launcher, obstacles, others, state.zSign,
-        );
-        state.targetDests[0] = res.dest;
-        state.targetReevalTimers[0] = res.reevalTimer;
-        break;
+    // Phase H.5/H.6: Scheme 指示 + Cut 状態 + OREB クラッシュで既存ロール移動を上書き
+    const offRel = ti + 1; // offense rel idx
+    const offAbs = state.offenseBase + offRel;
+    let movedByOverride = false;
+
+    // 優先 1: ショット飛行中 → C / PF はリム周辺へクラッシュ (OREB 準備)
+    // ti=2 (C) → ローポスト左、ti=3 (PF) → ローポスト右 (RoleSpots 由来の名前付き定義)
+    if (state.ballActive && !state.interceptPt && !state.looseBall && (ti === 2 || ti === 3)) {
+      const zSign: 1 | -1 = state.attackGoalZ > 0 ? 1 : -1;
+      const crashSpot = ti === 2 ? getLowPostLeft(zSign) : getLowPostRight(zSign);
+      movedByOverride = applyDestMovement(targets[ti], { x: crashSpot.x, z: crashSpot.z }, 1.4, dt);
+    }
+
+    // 優先 2: カット中
+    if (!movedByOverride) {
+      const cutState = state.cutStates[offRel];
+      if (cutState && cutState.remainingTime > 0 && cutState.skillId !== '') {
+        movedByOverride = applyDestMovement(targets[ti], cutState.dest, 1.3, dt);
       }
-      case 1:
-        moveSlasher(targets[1], state.slasherState, dt, launcher, obstacles, others, state.zSign);
-        break;
-      case 2:
-        moveScreener(targets[2], state.screenerState, dt, launcher, obstacles, others, state.zSign);
-        break;
-      case 3:
-        moveDunker(targets[3], state.dunkerState, dt, launcher, obstacles, others, state.zSign);
-        break;
+    }
+
+    // 優先 3: トランジション or オフェンス scheme 指示 (閾値 priority ≥7 でセットプレーのみ)
+    // ※ Motion Offense (priority 5-6) は Greedy 再評価でワープを誘発するため除外。
+    //   既存ロール AI (findOpenSpaceInZone) がスペーシングを担当する。
+    //   PnR / Spain / DHO (priority 7-8) のみ override 可。
+    if (!movedByOverride) {
+      const transIns = state.schemeTransitionInstructions.find(i => i.entityIdx === offAbs && i.priority >= 7);
+      if (transIns && transIns.dest) {
+        movedByOverride = applyDestMovement(targets[ti], transIns.dest, transIns.speedMult, dt);
+      } else {
+        const offIns = state.schemeOffenseInstructions.find(i => i.entityIdx === offAbs && i.priority >= 7);
+        if (offIns && offIns.dest) {
+          movedByOverride = applyDestMovement(targets[ti], offIns.dest, offIns.speedMult, dt);
+        }
+      }
+    }
+
+    // 既存ロール移動 (override が無い場合)
+    if (!movedByOverride) {
+      const others = getOtherTargets(ti);
+      switch (ti) {
+        case 0: {
+          const res = moveSecondHandler(
+            targets[0], state.targetDests[0], state.targetReevalTimers[0],
+            dt, launcher, obstacles, others, state.zSign,
+          );
+          state.targetDests[0] = res.dest;
+          state.targetReevalTimers[0] = res.reevalTimer;
+          break;
+        }
+        case 1:
+          moveSlasher(targets[1], state.slasherState, dt, launcher, obstacles, others, state.zSign);
+          break;
+        case 2:
+          moveScreener(targets[2], state.screenerState, dt, launcher, obstacles, others, state.zSign);
+          break;
+        case 3:
+          moveDunker(targets[3], state.dunkerState, dt, launcher, obstacles, others, state.zSign);
+          break;
+      }
     }
 
     // プッシュ妨害による速度減衰を適用

@@ -2,6 +2,7 @@ import {
   type SimZone,
   ZONE_PG, ZONE_SG_WING, ZONE_SF_WING, ZONE_C_POST, ZONE_PF_LOW,
 } from "../Config/FieldConfig";
+import { getOffensiveSpot, type FormationKind } from "../Court/RoleSpots";
 
 // --- Offense role types ---
 export type SimPosition = 'PG' | 'SG' | 'SF' | 'PF' | 'C';
@@ -12,21 +13,36 @@ export interface SimRoleAssignment {
   speedMult: number; reevalInterval: number;
 }
 
-// --- Role assignment table ---
+// --- ベースフォーメーション: 4-Out 1-In (現状のロール構成に最も近い) ---
+const BASE_FORMATION: FormationKind = 'four-out-one-in';
+
+/** ロール → ホーム位置を CourtSpots/RoleSpots 経由で取得 (zSign=+1 基準) */
+function homeFor(pos: SimPosition): { x: number; z: number } {
+  const spot = getOffensiveSpot(pos, BASE_FORMATION, 1);
+  return { x: spot.x, z: spot.z };
+}
+
+// --- Role assignment table (ホーム位置は CourtSpots から自動導出) ---
+const _pgHome = homeFor('PG');
+const _sgHome = homeFor('SG');
+const _sfHome = homeFor('SF');
+const _cHome  = homeFor('C');
+const _pfHome = homeFor('PF');
+
 export const ROLE_ASSIGNMENTS: {
   launcher: SimRoleAssignment;
   targets: SimRoleAssignment[];
 } = {
   launcher: {
     position: 'PG', role: 'MAIN_HANDLER',
-    zone: ZONE_PG, homeX: 0, homeZ: 6.2,
+    zone: ZONE_PG, homeX: _pgHome.x, homeZ: _pgHome.z,
     speedMult: 1.0, reevalInterval: 1.5,
   },
   targets: [
-    { position: 'SG', role: 'SECOND_HANDLER', zone: ZONE_SG_WING, homeX: 5.1, homeZ: 8.3, speedMult: 1.0, reevalInterval: 1.5 },
-    { position: 'SF', role: 'SLASHER', zone: ZONE_SF_WING, homeX: -5.1, homeZ: 8.3, speedMult: 1.1, reevalInterval: 1.2 },
-    { position: 'C',  role: 'SCREENER', zone: ZONE_C_POST, homeX: 0, homeZ: 10.5, speedMult: 0.9, reevalInterval: 2.0 },
-    { position: 'PF', role: 'DUNKER', zone: ZONE_PF_LOW, homeX: 2.4, homeZ: 13.0, speedMult: 0.95, reevalInterval: 1.8 },
+    { position: 'SG', role: 'SECOND_HANDLER', zone: ZONE_SG_WING, homeX: _sgHome.x, homeZ: _sgHome.z, speedMult: 1.0, reevalInterval: 1.5 },
+    { position: 'SF', role: 'SLASHER',        zone: ZONE_SF_WING, homeX: _sfHome.x, homeZ: _sfHome.z, speedMult: 1.1, reevalInterval: 1.2 },
+    { position: 'C',  role: 'SCREENER',       zone: ZONE_C_POST,  homeX: _cHome.x,  homeZ: _cHome.z,  speedMult: 0.9, reevalInterval: 2.0 },
+    { position: 'PF', role: 'DUNKER',         zone: ZONE_PF_LOW,  homeX: _pfHome.x, homeZ: _pfHome.z, speedMult: 0.95, reevalInterval: 1.8 },
   ],
 };
 

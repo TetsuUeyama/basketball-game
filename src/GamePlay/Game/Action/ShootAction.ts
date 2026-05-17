@@ -35,7 +35,7 @@ export type ShotType = 'dunk' | 'layup' | 'jumpshot';
 
 /** 動的ゴール座標（state.attackGoalX/Z をセッション開始時に設定） */
 let _goalX = 0;
-let _goalZ = 13.4;
+let _goalZ = 12.725;
 let _zSign: 1 | -1 = 1;
 
 /** 現在の攻撃ゴール座標を設定（possession切替時に呼ばれる） */

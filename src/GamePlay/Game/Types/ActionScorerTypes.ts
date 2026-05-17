@@ -22,6 +22,8 @@ export interface ActionScorerContext {
   receiverEntityIndices: number[];
   anyInTransit: boolean;
   offBallIntents: (OffBallIntentEntry | null)[]; // レシーバーの intent 参照用
+  /** Phase H.1.4: 現在のショットクロック残り秒数 (undefined なら未考慮) */
+  shotClockRemaining?: number;
 }
 
 // --- ScoreFactor (拡張ポイント) ---

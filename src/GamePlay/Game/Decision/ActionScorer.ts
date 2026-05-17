@@ -70,6 +70,7 @@ export function buildOnBallContext(
   receiverRoles: string[],
   fireCtx: BallFireContext,
   intentProvider: IntentProvider,
+  shotClockRemaining?: number,
 ): ActionScorerContext {
   const allOffense = [state.launcher, ...state.targets];
   const offBallIntents = receiverEntityIndices.map(ei => intentProvider.getIntent(ei));
@@ -88,6 +89,7 @@ export function buildOnBallContext(
     receiverEntityIndices,
     anyInTransit: state.offenseInTransit.some(t => t),
     offBallIntents,
+    shotClockRemaining,
   };
 }
 
