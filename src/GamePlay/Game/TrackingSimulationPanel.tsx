@@ -67,6 +67,12 @@ export function TrackingSimulationPanel() {
   const [boxStats, setBoxStats] = useState<PlayerStats[]>([]);
   const [pbpEvents, setPbpEvents] = useState<PlayEvent[]>([]);
   const [timeouts, setTimeouts] = useState<[number, number]>([7, 7]);
+  const [violation, setViolation] = useState<{
+    maxPaintTime: number;
+    maxPaintPlayerIdx: number;
+    backcourtTimer: number;
+    hasCrossedHalfcourt: boolean;
+  }>({ maxPaintTime: 0, maxPaintPlayerIdx: -1, backcourtTimer: 0, hasCrossedHalfcourt: true });
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -134,7 +140,7 @@ export function TrackingSimulationPanel() {
         ball.reinitializePhysics();
 
         // --- Start tracking simulation ---
-        const sim = new TrackingSimulation3D(scene, ball);
+        const sim = new TrackingSimulation3D(scene, ball, field);
         sim.start();
         simRef.current = sim;
 
@@ -170,6 +176,13 @@ export function TrackingSimulationPanel() {
           setPbpEvents(sim.getPlayByPlay().getRecent(20));
           const tm = sim.getTimeoutManager();
           setTimeouts([tm.getRemaining(0), tm.getRemaining(1)]);
+          const vs = sim.getViolationStatus();
+          setViolation({
+            maxPaintTime: vs.maxPaintTime,
+            maxPaintPlayerIdx: vs.maxPaintPlayerIdx,
+            backcourtTimer: vs.backcourtTimer,
+            hasCrossedHalfcourt: vs.hasCrossedHalfcourt,
+          });
         }, 200);
 
         setReady(true);
@@ -210,6 +223,7 @@ export function TrackingSimulationPanel() {
       setBoxStats([]);
       setPbpEvents([]);
       setTimeouts([7, 7]);
+      setViolation({ maxPaintTime: 0, maxPaintPlayerIdx: -1, backcourtTimer: 0, hasCrossedHalfcourt: true });
     }
   };
 
@@ -265,6 +279,64 @@ export function TrackingSimulationPanel() {
               {clockInfo.lastEvent}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Phase H.13: 違反タイマー プログレスバー (画面上部、常時表示) */}
+      {ready && (violation.maxPaintTime > 0.5 || (!violation.hasCrossedHalfcourt && violation.backcourtTimer > 0.5)) && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 pointer-events-none flex flex-col gap-1 min-w-[280px]">
+          {/* 3秒バイオレーション */}
+          {violation.maxPaintTime > 0.5 && (
+            <div className="bg-black/75 rounded-md px-3 py-1.5 backdrop-blur-sm">
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="font-bold text-white">
+                  3-SEC PAINT {violation.maxPaintPlayerIdx >= 0 ? `(PL${violation.maxPaintPlayerIdx})` : ''}
+                </span>
+                <span className={`font-mono ${
+                  violation.maxPaintTime > 2.5 ? 'text-red-400' :
+                  violation.maxPaintTime > 1.5 ? 'text-yellow-300' :
+                  'text-green-300'
+                }`}>
+                  {violation.maxPaintTime.toFixed(1)}s / 3.0s
+                </span>
+              </div>
+              <div className="w-full h-2 bg-gray-700 rounded overflow-hidden">
+                <div
+                  className={`h-full transition-all ${
+                    violation.maxPaintTime > 2.5 ? 'bg-red-500' :
+                    violation.maxPaintTime > 1.5 ? 'bg-yellow-400' :
+                    'bg-green-500'
+                  }`}
+                  style={{ width: `${Math.min(100, (violation.maxPaintTime / 3.0) * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+          {/* 8秒バックコート */}
+          {!violation.hasCrossedHalfcourt && violation.backcourtTimer > 0.5 && (
+            <div className="bg-black/75 rounded-md px-3 py-1.5 backdrop-blur-sm">
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="font-bold text-white">8-SEC BACKCOURT</span>
+                <span className={`font-mono ${
+                  violation.backcourtTimer > 6.5 ? 'text-red-400' :
+                  violation.backcourtTimer > 4.5 ? 'text-yellow-300' :
+                  'text-green-300'
+                }`}>
+                  {violation.backcourtTimer.toFixed(1)}s / 8.0s
+                </span>
+              </div>
+              <div className="w-full h-2 bg-gray-700 rounded overflow-hidden">
+                <div
+                  className={`h-full transition-all ${
+                    violation.backcourtTimer > 6.5 ? 'bg-red-500' :
+                    violation.backcourtTimer > 4.5 ? 'bg-yellow-400' :
+                    'bg-green-500'
+                  }`}
+                  style={{ width: `${Math.min(100, (violation.backcourtTimer / 8.0) * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
 

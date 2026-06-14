@@ -9,6 +9,19 @@ import type { SimMover } from "../Types/TrackingSimTypes";
 import { dist2d, normAngleDiff, moveWithFacing } from "../Movement/MovementCore";
 import { isPhysicallyClose, fovHalfAtDist } from "./TrajectoryAnalysis";
 import { scoreFieldPosition } from "./FieldPositionScorer";
+import { scoreSpacing } from "./Spacing";
+import { getGoalX, getGoalZ } from "../Action/ShootAction";
+import { isInPaint } from "../Config/GoalConfig";
+
+/** Phase H.24: 3秒違反回避は「常時」適用。off-ball の dest を最初から paint に置かない。
+ *  - 基本ペナルティ: paintTime=0 でも paint 内 dest は減点 (proactive avoidance)
+ *  - escalate 閾値: これ以上ならさらに強いペナルティ (緊急退出)
+ */
+const PAINT_AVOIDANCE_BASE_PENALTY = 20.0;
+/** paint 滞在 escalate 閾値 (秒) */
+const PAINT_AVOIDANCE_ESCALATE_THRESHOLD = 0.5;
+/** escalate 後の追加ペナルティ (1秒あたり) */
+const PAINT_AVOIDANCE_ESCALATE_PENALTY = 30.0;
 
 /** Find open space on field */
 export function findOpenSpace(
@@ -66,7 +79,10 @@ export function findOpenSpace(
   return { x: bestX, z: bestZ };
 }
 
-/** Zone-constrained open space finder */
+/** Zone-constrained open space finder.
+ *  @param paintTimeAccumulated Phase H.12: この選手が現在の paint 滞在で蓄積している秒数。
+ *    1.5s 以上なら paint 内位置を強くペナルティし、3秒違反を回避する。
+ */
 export function findOpenSpaceInZone(
   zone: SimZone,
   launcher: SimMover,
@@ -75,6 +91,7 @@ export function findOpenSpaceInZone(
   homeX: number,
   homeZ: number,
   samples = 20,
+  paintTimeAccumulated = 0,
 ): { x: number; z: number } {
   let bestX = homeX;
   let bestZ = homeZ;
@@ -123,13 +140,33 @@ export function findOpenSpaceInZone(
     const homeDist = dist2d(px, pz, homeX, homeZ);
     score -= homeDist * 0.3;
 
-    // Teammate spacing (includes launcher to avoid clustering near ball handler)
-    const SPREAD_MIN = 3.5;
+    // Phase H.11: 包括的スペーシング評価 (理想 4.57-5.49m + フロアバランス + ドライブレーン)
+    //   旧実装は SPREAD_MIN=3.5m の単純混雑ペナルティのみ。
+    //   新実装は IDEAL_SPACING_MIN/MAX に基づく理想距離ボーナス + コート 3 等分のフロアバランス
+    //   + ボールハンドラーのドライブレーン確保
     const teammates = [launcher, ...otherTargets];
-    for (const mate of teammates) {
-      const mateDist = dist2d(px, pz, mate.x, mate.z);
-      if (mateDist < SPREAD_MIN) {
-        score -= (SPREAD_MIN - mateDist) * 4;
+    const allOffense = [launcher, ...otherTargets]; // 自分以外 (note: 評価点 (px, pz) は別位置として扱い)
+    const spacingScore = scoreSpacing(
+      px, pz,
+      teammates,        // 接近ペナルティ + 理想距離ボーナス
+      allOffense,       // フロアバランス用
+      launcher,         // ボール保持者 (drive lane の起点)
+      getGoalX(), getGoalZ(),
+    );
+    score += spacingScore.total * 3.0; // weight
+
+    // Phase H.24: 3秒違反回避 — paint 内 dest は常時ペナルティ + 滞在時間で escalate
+    //   off-ball プレイヤーは on-ball 以外 3秒違反対象なので、最初から paint dest を避ける。
+    //   on-ball プレイヤーは moveOnBallSmart 経由 (本関数を通らない) なので影響なし。
+    {
+      const goalZ = getGoalZ();
+      const goalSide: 1 | -1 = goalZ > 0 ? 1 : -1;
+      if (isInPaint(px, pz, goalSide)) {
+        score -= PAINT_AVOIDANCE_BASE_PENALTY;
+        if (paintTimeAccumulated > PAINT_AVOIDANCE_ESCALATE_THRESHOLD) {
+          const overTime = paintTimeAccumulated - PAINT_AVOIDANCE_ESCALATE_THRESHOLD;
+          score -= PAINT_AVOIDANCE_ESCALATE_PENALTY * (1 + overTime);
+        }
       }
     }
 

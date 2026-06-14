@@ -496,6 +496,138 @@ Phase 1 (ボクセル化) と Phase H は独立して進められる。 Phase 2/
 
 ---
 
+## Phase I: 個人スキル × 個人ディフェンス深化 (実行レイヤー)
+
+**目的:** Phase H.2 で「登録のみ」だった個人スキルに **execution + outcome** を付与し、対するディフェンス側スキル (closeout / swipe / block / take charge 等) を対称に実装する。両者の衝突は SkillVersusSolver で確率判定する。
+
+**現状の課題:**
+- `Skills/` (Dribble 6 / Finish 3 / Cuts 5 / Footwork 5 = 19) は **trigger condition のみ**。execution と outcome 未配線で「発火するけど何も起きない」
+- ディフェンスは ObstacleDefenseAI で position マッチアップのみ。closeout / swipe / block timing 等のスキル概念が不在
+
+**設計方針:**
+- Skill = (trigger, execution, outcome) の三位一体
+- Offense と Defense を対称に設計、同フレーム両者発火は **SkillVersusSolver** で勝敗判定
+- 既存 19 スキルは trigger を活かし execution 追加で実装
+
+### Phase I.1: 共通基盤 (1 週)
+
+新規ファイル:
+- `Skills/SkillExecutionTypes.ts` — `SkillExecutionState` (skillId / phase: startup/active/recovery / elapsed / params)
+- `Skills/SkillExecutor.ts` — `tickSkill(mover, dt)` で phase 進行
+- `Skills/SkillVersusSolver.ts` — off × def 衝突 → 確率判定
+- `Skills/SkillOutcomeTypes.ts` — outcome: succeeded / stripped / fouled / blocked / charged
+
+既存統合:
+- `SimMover.activeSkill?: SkillExecutionState` 追加
+- `SimEntityUpdate` の on-ball 移動分岐に SkillExecutor 委譲
+- `ObstacleDefenseAI` 側も同様
+
+### Phase I.2: オフェンス個人スキル execution (2 週)
+
+10 スキル (既存 6 + 新規 4):
+
+| Skill | startup | active | recovery | 主効果 |
+|---|---|---|---|---|
+| Crossover | 0.10s | 0.25s 横 1.5m + ボール切替 | 0.10s | DF balance >0.7 で抜き |
+| StepBack | 0.10s | 0.30s 後方 1.2m + shot prep | 0.15s | シュート成功率 +15% |
+| Spin | 0.10s 軸足 | 0.40s 360° + ゴール方向 0.8m | 0.20s | 体接触圏で背中遮断 |
+| Eurostep | 0.10s 拾い | 0.50s 左右 2 ステップ | 0.15s | 複数 DF を分断 |
+| Hesitation | 0.15s 減速 | 0.25s 急加速 | 0.10s | 加速差で抜き |
+| InAndOut | 0.10s 偽方向 | 0.20s 同方向加速 | 0.10s | DF half-commit |
+| Jab Step (新) | 0.15s 偽 step | 0.15s reset | — | DF 反応観察 → 次 skill 条件 |
+| Rip Through (新) | 0.10s 下げ | 0.20s 突出 | 0.10s | スティール圏外退避 |
+| Floater (新) | 0.20s | 0.30s 短 jump | 0.20s | 長身 DF 越し、ペイント手前 |
+| Hook Shot (新) | 0.15s | 0.40s 振上げ | 0.20s | 200cm+ ポスト、リム背向き |
+
+### Phase I.3: ディフェンス個人スキル (2 週、新規)
+
+新規ディレクトリ `Skills/Defense/` (10 スキル):
+
+| Skill | 発火条件 | execution | outcome |
+|---|---|---|---|
+| Closeout | パス受け手 3-9ft | sprint 75% → chop step + hand high/low | shot contest +30% / drive lane 開 |
+| Defensive Slide | on-ball + drive | 横 slide 1.5 m/s (cross 禁止) | balance 維持で beat 回避 |
+| Swipe Down | ボール膝下 + DF hand 下 | 0.15s up swipe | 50-70% steal / 失敗で foul |
+| Block Attempt | shooter upward + DF in lane | 垂直 jump + verticality | block / clean / foul |
+| Take Charge | drive line に先行 position | 静止 + arms vertical | charge / blocking foul |
+| Strip Pocket | Eurostep 中 + ボール low | swipe + step in | strip / foul |
+| Box Out | リバウンド前 | offense と rim の間維持 | reb position 確保 |
+| Hedge (PnR) | screen 接触 | screener DF が ball-handler に短時間圧 | drive 遅延 / recover 必要 |
+| Drop (PnR) | screen → screener DF 後退 | リム保護 / 3P 許容 | layup 阻止 |
+| Switch (PnR) | screen 時 | 2 DF が mark 入替 | mismatch 発生時リスク |
+
+### Phase I.4: SkillVersusSolver (1 週)
+
+衝突マトリクスの代表例:
+
+| Offense | Defense | base success | 修飾子 |
+|---|---|---|---|
+| Crossover | Defensive Slide | 65% | DF speed × off ball-handling |
+| Spin | Strip Pocket | 70% | off body shield × DF hand timing |
+| Spin | Stay vertical | 80% | off accel × DF balance |
+| Eurostep | Strip Pocket | 60% | off ball-protect × DF reaction |
+| StepBack | Closeout (high hand) | 55% (shot) | shooter range × DF closeout speed |
+| Jump shot | Block | 75% (clean) | shooter release × DF jump timing |
+| Drive layup | Take Charge | 50% | off path-change × DF set-time |
+| PnR pass | Hedge | 40% (turnover) | passer IQ × hedger speed |
+
+アルゴリズム:
+1. 同フレーム両者発火検出
+2. base × Π(修飾子) で確率算出
+3. dice roll
+4. outcome を ActionState に書込 (succeeded / stripped → loose ball / fouled → FT / charged → TOV)
+
+### Phase I.5: アニメーションフック (1 週)
+
+- 既存 `ArmLerpState` / `LegStepState` に skill-specific override 追加
+- skill active 中: torso 回転 (Spin)、arm dribble pattern (Crossover)、jump (Block/Floater)
+- アセット変更なし、手続き的 anim 拡張のみ
+
+### Phase I.6: 個性化 (継続)
+
+PlayerAbility が skill に影響:
+- `ballHandling`: trigger 閾値緩和 + execution 速度
+- `defensiveIq`: 相手 skill 予測で先行 stance
+- `verticalLeap`: block / dunk base success
+- `strength`: post move + box out 優位
+- `quickness`: closeout / slide speed
+
+PlayerStats から `SimPlayerAbility` への変換 (H.4.4) を活用、トレイト追加。
+
+### 実装順序
+
+| Phase | 内容 | 期間 |
+|---|---|---|
+| I.1 | SkillExecutor + Solver 基盤 | 1週 |
+| I.2 | オフェンス 10 スキル execution | 2週 |
+| I.3 | ディフェンス 10 スキル | 2週 |
+| I.4 | Solver マトリクス + 確率 | 1週 |
+| I.5 | アニメフック | 1週 |
+| I.6 | 個性化 | 継続 |
+| 合計 | | 7週 |
+
+### リサーチソース (2026-05-18 実施)
+
+- [SimpliFaster — Deconstructing Defense](https://simplifaster.com/articles/deconstructing-preformance-training-basketball-defense/)
+- [Ballerbootcamp — How To Spin Move](https://ballerbootcamp.com/how-to-spin-move-in-basketball/)
+- [Asia Gym — Crossover Technique](https://asia.gymaesthetics.com/blogs/sport-basketball/mastering-the-basketball-crossover-techniques-tips-and-benefits)
+- [Basketball Fundamentals — Step Back](https://basketballfundamentals.com/how-to-master-the-step-back-jumper-create-space-and-score-like-luka-doncic/)
+- [ESPN — The Eurostep](https://www.espn.com/nba/story/_/id/25206602/most-dangerous-two-step-game)
+- [Wikipedia — Euro Step](https://en.wikipedia.org/wiki/Euro_step)
+- [Hooper U — The Right Way to Closeout](https://www.hooperuniversity.com/breakdowns/the-right-way-to-closeout-and-contest)
+- [Breakthrough — Closeout Keys](https://www.breakthroughbasketball.com/defense/keys-close-outs.html)
+- [Breakthrough — Defensive Hands](https://www.breakthroughbasketball.com/defense/defensive-hands-guide.html)
+- [PGC — Gnaw Pocket Defense](https://pgcbasketball.com/blog/more-steals-with-gnaw-pocket-defense/)
+- [Hooper U — Post Moves to Master](https://www.hooperuniversity.com/breakdowns/post-moves-every-big-should-master)
+- [Breakthrough — Drop Step Counter](https://www.breakthroughbasketball.com/drills/drop-step-counter)
+- [NRBA — Triple Threat Cross Jab](https://www.nrbasketballacademy.com/2022/03/01/triple-threat-cross-jab-rip-go-option/)
+- [Pick and Pop — PnR Coverages](https://www.pickandpop.net/pick-and-roll-coverages-explained-without-jargon-drop-hedge-switch/)
+- [Breakthrough — PnR Defense](https://www.breakthroughbasketball.com/fundamentals/defending-pick-and-roll-coverages)
+- [NBA Official — Verticality](https://official.nba.com/inside-the-rulebook-verticality/)
+- [NBA Official — Restricted Area](https://official.nba.com/nba-rule-authority-restricted-area-and-verticality-plays/)
+
+---
+
 ## 将来的な計画（スコープ外、設計時考慮）
 
 - **3D 試合とシーズンモードの接続** — 現在 `SimulationPlay/Season/SeasonHome.handlePlay` は TODO で SIM 代用。将来 `/league/match` と同様に `/season/match` 経由で TrackingSimulation3D に遷移させる。

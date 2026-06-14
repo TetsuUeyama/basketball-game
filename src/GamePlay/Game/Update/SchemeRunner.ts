@@ -140,6 +140,12 @@ export function findInstructionForPlayer(
   return null;
 }
 
+/** Phase H.9: インバウンド中のインバウンダーかどうか判定 */
+export function isInbounder(state: { inboundActive: boolean; inboundInbounderRelIdx: number; offenseBase: number }, entityAbsIdx: number): boolean {
+  if (!state.inboundActive) return false;
+  return entityAbsIdx === state.offenseBase + state.inboundInbounderRelIdx;
+}
+
 export function findDefenseInstruction(
   schemes: ActiveSchemes,
   entityAbsIdx: number,

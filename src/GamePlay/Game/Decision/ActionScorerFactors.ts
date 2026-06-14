@@ -481,6 +481,90 @@ export const shootRimWideOpen: ScoreFactor = {
 };
 
 /**
+ * Phase H.15: 8秒違反回避 — バックコート滞在 + ハーフコート未越え + 受け手が frontcourt にいるなら強制パス
+ *   ボール保持者がドリブルで前進できない時のパスアウト選択肢を提供。
+ */
+export const passBackcourtUrgency: ScoreFactor = {
+  id: 'pass:backcourtUrgency',
+  action: 'pass',
+  weight: 12.0,
+  evaluate(ctx: ActionScorerContext): number {
+    const bt = ctx.backcourtTimer;
+    if (bt === undefined || bt < 4.0) return 0;
+    if (ctx.hasCrossedHalfcourt) return 0;
+    if (ctx.attackGoalZ === undefined) return 0;
+    // 最良 receiver が frontcourt (attackGoalZ 側) にいるかチェック
+    if (ctx.receiverEntityIndices.length === 0) return 0;
+    const receiverEntityIdx = ctx.receiverEntityIndices[ctx.bestPassTargetIdx];
+    const receiver = ctx.allOffense[receiverEntityIdx];
+    if (!receiver) return 0;
+    // attackGoalZ と同符号 = frontcourt
+    const inFrontcourt = ctx.attackGoalZ > 0 ? receiver.z > 0 : receiver.z < 0;
+    if (!inFrontcourt) return 0;
+    // バックコート残り時間に応じてスコア (4-8s で 0.5 → 1.0)
+    return clamp((bt - 4.0) / 4.0, 0.5, 1.0);
+  },
+};
+
+/**
+ * Phase H.15: 3秒違反回避 — ボール保持者が paint で長居しているならパスアウト
+ *   ボール保持者は 3 秒違反対象外だが、ペイントから出るためにパスを促す。
+ *   (味方がペイント内で 3 秒違反になりそうな場合も適用)
+ */
+export const passPaintEscape: ScoreFactor = {
+  id: 'pass:paintEscape',
+  action: 'pass',
+  weight: 8.0,
+  evaluate(ctx: ActionScorerContext): number {
+    if (ctx.attackGoalZ === undefined) return 0;
+    // ペイント内に長居している味方を探す (state からは取得できないので近似: ペイント内人数)
+    const paintHalfWidth = 2.44;
+    const fieldZHalf = 14.325;
+    const paintDepth = 5.79;
+    const goalSide: 1 | -1 = ctx.attackGoalZ > 0 ? 1 : -1;
+    let paintCount = 0;
+    for (const p of ctx.allOffense) {
+      if (Math.abs(p.x) > paintHalfWidth) continue;
+      const inPaint = goalSide === 1
+        ? p.z >= fieldZHalf - paintDepth && p.z <= fieldZHalf
+        : p.z >= -fieldZHalf && p.z <= -(fieldZHalf - paintDepth);
+      if (inPaint) paintCount++;
+    }
+    // ペイント内 2 人以上 → パスでクリア促進
+    if (paintCount >= 2) return 0.8;
+    return 0;
+  },
+};
+
+/**
+ * Phase H.9: インバウンド中の強制パス促進
+ * インバウンダーは shoot/hold ではなく必ず pass を選択する。
+ */
+export const passInboundForce: ScoreFactor = {
+  id: 'pass:inboundForce',
+  action: 'pass',
+  weight: 30.0, // 最強級
+  evaluate(ctx: ActionScorerContext): number {
+    return ctx.inboundActive ? 1.0 : 0;
+  },
+};
+
+/**
+ * Phase H.9: インバウンド中の hold 抑制
+ * インバウンド中に hold すると 5 秒違反になるため、絶対避けたい。
+ */
+export const holdInboundSuppress: ScoreFactor = {
+  id: 'hold:inboundSuppress',
+  action: 'hold',
+  weight: 30.0,
+  evaluate(ctx: ActionScorerContext): number {
+    // インバウンド中は hold スコアを大きく下げる (負の効果)
+    // weight が正なので、return -1 で実質 -30 のペナルティ
+    return ctx.inboundActive ? -1.0 : 0;
+  },
+};
+
+/**
  * Phase H.5: ミドル/3P レンジでドフリー時のシュート促進
  * 脅威 DF なし + ショットレンジ内で 0.7 程度
  */
@@ -505,6 +589,79 @@ export const shootOpenRange: ScoreFactor = {
 };
 
 // =========================================================================
+// Phase H.26: 3秒バイオレーション回避を AI 判断に組込み
+// =========================================================================
+
+/** 3秒違反の警戒閾値 (秒) — これ以上ならレスキュー行動を起動 */
+const PAINT_RESCUE_WARN_THRESHOLD = 1.5;
+/** 3秒違反の緊急閾値 (秒) — これ以上なら force shoot レベル */
+const PAINT_RESCUE_CRITICAL_THRESHOLD = 2.2;
+
+/** 味方のうち最大 paint 滞在秒を返す (on-ball 含む。on-ball は通常 0 だが念のため) */
+function maxTeammatePaintTime(ctx: ActionScorerContext): number {
+  if (!ctx.teammatePaintTimes) return 0;
+  let max = 0;
+  for (let i = 0; i < ctx.teammatePaintTimes.length; i++) {
+    if (i === ctx.actualOnBallEntityIdx) continue; // on-ball は exempt
+    if (ctx.teammatePaintTimes[i] > max) max = ctx.teammatePaintTimes[i];
+  }
+  return max;
+}
+
+/**
+ * Phase H.26: 味方が 3秒違反寸前なら強制シュート (possession 変わるか catch でリセット)
+ *   WARN (1.5s) で 0.4 開始、CRITICAL (2.2s) で 1.0。
+ */
+export const shootPaintRescue: ScoreFactor = {
+  id: 'shoot:paintRescue',
+  action: 'shoot',
+  weight: 8.0,
+  evaluate(ctx: ActionScorerContext): number {
+    if (!canShoot(ctx.mover)) return 0;
+    const maxPaint = maxTeammatePaintTime(ctx);
+    if (maxPaint < PAINT_RESCUE_WARN_THRESHOLD) return 0;
+    if (maxPaint >= PAINT_RESCUE_CRITICAL_THRESHOLD) return 1.0;
+    return 0.4 + clamp((maxPaint - PAINT_RESCUE_WARN_THRESHOLD) / (PAINT_RESCUE_CRITICAL_THRESHOLD - PAINT_RESCUE_WARN_THRESHOLD), 0, 1) * 0.6;
+  },
+};
+
+/**
+ * Phase H.26: paint 滞在 1秒以上の味方への pass は強くブースト。
+ *   レシーバーが catch するとそのプレイヤーの paint 滞在秒は 0 にリセット (on-ball exempt)。
+ *   bestPassTargetIdx が「paint 危機の選手」なら高スコア。違う相手ならゼロ。
+ */
+export const passPaintRescue: ScoreFactor = {
+  id: 'pass:paintRescue',
+  action: 'pass',
+  weight: 7.0,
+  evaluate(ctx: ActionScorerContext): number {
+    if (!ctx.teammatePaintTimes) return 0;
+    if (ctx.receiverEntityIndices.length === 0) return 0;
+    const receiverEntityIdx = ctx.receiverEntityIndices[ctx.bestPassTargetIdx];
+    const receiverPaintTime = ctx.teammatePaintTimes[receiverEntityIdx] ?? 0;
+    if (receiverPaintTime < 1.0) return 0;
+    // 1.0s で 0.5、2.5s 以上で 1.0
+    return clamp((receiverPaintTime - 1.0) / 1.5, 0, 1) * 0.5 + 0.5;
+  },
+};
+
+/**
+ * Phase H.26: 味方が paint 危機なら hold (ドリブル継続) は不適切。負スコアで強くペナルティ。
+ */
+export const holdPaintAvoid: ScoreFactor = {
+  id: 'hold:paintAvoid',
+  action: 'hold',
+  weight: 10.0,
+  evaluate(ctx: ActionScorerContext): number {
+    const maxPaint = maxTeammatePaintTime(ctx);
+    if (maxPaint < PAINT_RESCUE_WARN_THRESHOLD) return 0;
+    // -1.0 で 10 重み = -10 ペナルティ。CRITICAL で hold を確実に却下
+    if (maxPaint >= PAINT_RESCUE_CRITICAL_THRESHOLD) return -1.0;
+    return -clamp((maxPaint - PAINT_RESCUE_WARN_THRESHOLD) / (PAINT_RESCUE_CRITICAL_THRESHOLD - PAINT_RESCUE_WARN_THRESHOLD), 0, 1);
+  },
+};
+
+// =========================================================================
 // Default factor collection
 // =========================================================================
 
@@ -523,6 +680,10 @@ export const DEFAULT_FACTORS: ScoreFactor[] = [
   passDefenderAwareness,
   passSituational,
   passShotClockUrgency,          // Phase H.1.4
+  passInboundForce,              // Phase H.9
+  holdInboundSuppress,           // Phase H.9
+  passBackcourtUrgency,          // Phase H.15
+  passPaintEscape,               // Phase H.15
   shootRimWideOpen,              // Phase H.5
   shootOpenRange,                // Phase H.5
   holdSafety,
@@ -530,4 +691,7 @@ export const DEFAULT_FACTORS: ScoreFactor[] = [
   holdDefenderAwareness,
   holdSituational,
   holdShotClockBuffer,           // Phase H.1.4
+  shootPaintRescue,              // Phase H.26
+  passPaintRescue,               // Phase H.26
+  holdPaintAvoid,                // Phase H.26
 ];

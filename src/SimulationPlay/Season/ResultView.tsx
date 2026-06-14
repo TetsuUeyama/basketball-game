@@ -21,6 +21,9 @@ export function ResultView({ state, matchId, onContinue }: ResultViewProps) {
 
 
   
+
+
+  
   if (!match?.result) return null;
 
   const isPlayerWin =

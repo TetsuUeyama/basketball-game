@@ -7,12 +7,15 @@ export const DEFLECT_IMPULSE = 1.2;    // 弾きインパルス強度 (kg·m/s)
 export const DEFLECT_COOLDOWN = 0.3;   // 同一障害物の連続弾き防止 (秒)
 
 // --- On-ball movement ---
-export const ON_BALL_SPEED_MULT = 0.75;  // ボール保持時の移動速度倍率
+// Phase H.25: 0.75 → 1.0 (ボール保持中もフルスピード dribble 可能)
+//   旧 0.75 だと PG 速度 0.9*0.75=0.675m/s で歩行以下、defender 4.5m/s に追いつかれ放題で
+//   on-ball player が判断する前に paint で 3秒バイオレーション頻発した。
+export const ON_BALL_SPEED_MULT = 1.0;   // ボール保持時の移動速度倍率
 export const ONBALL_BLOCK_RADIUS = 1.2;  // ディフェンダーが進路を塞ぐ距離 (m)
 
 // --- Defense engage threshold ---
-// Phase H.8: 6.0 → 3.0 へ緩和 (ハーフコート手前から追跡開始、フリー化防止)
-export const DEFENSE_ENGAGE_Z = 3.0;  // マーク対象がこのZ以上で追跡開始 (ハーフコート寄り)
+// Phase H.10d: 0.5 (ハーフコート直前) — マークがハーフコート越えたら即 engage で密着マーク
+export const DEFENSE_ENGAGE_Z = 0.5;  // マーク対象がこのZ以下 (defender 自陣側) で密着 mark 開始
 
 // --- Defense positioning ---
 export const DEFENSE_GOAL_OFFSET = 0.8;   // ゴールライン・ポジション: マーク対象からゴール方向へのオフセット (m)
@@ -49,3 +52,6 @@ export const PUSH_DENY_HOVER = 0.1;        // ディナイ時のホバー半径 
 // --- Obstacle speed ---
 export const OBSTACLE_IDLE_SPEED = 80 * S;         // 1.20 m/s
 export const OBSTACLE_INTERCEPT_SPEED = 180 * S;   // 2.70 m/s
+// Phase H.10b: 全力ダッシュ速度。守備リトリート/トランジション専用
+// 通常の intercept (2.70 m/s) より約 65% 速い (NBA トップスピード 6.7 m/s の 67%)
+export const OBSTACLE_FULL_SPRINT_SPEED = 4.5;     // 4.50 m/s

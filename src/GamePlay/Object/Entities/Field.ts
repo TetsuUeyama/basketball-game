@@ -1592,18 +1592,44 @@ export class Field {
     }
 
     // 境界壁の静的物理ボディ（ボールが外に出るのを防ぐ）
+    this.createBoundaryWallPhysics();
+  }
+
+  /**
+   * 境界壁の物理ボディを作成 (Phase H.9 で外部から再構築可能に分離)
+   */
+  private createBoundaryWallPhysics(): void {
     for (const wallMesh of this.boundaryWalls) {
       const wallPhysics = new PhysicsAggregate(
         wallMesh,
         PhysicsShapeType.BOX,
         {
-          mass: 0, // 静的オブジェクト
-          restitution: 0.5, // 適度な反発
+          mass: 0,
+          restitution: 0.5,
           friction: 0.3,
         },
         this.scene
       );
       this.boundaryWallPhysics.push(wallPhysics);
+    }
+  }
+
+  /**
+   * Phase H.9: 境界壁の物理を一時的に有効化/無効化する。
+   * スローイン中だけ無効化することで、インバウンダーが壁外から court 内へ投げ込める。
+   * 通常プレイ中は壁が機能してボールが場外に出るのを防ぐ。
+   */
+  public setBoundaryWallsEnabled(enabled: boolean): void {
+    if (enabled) {
+      // すでに有効ならスキップ
+      if (this.boundaryWallPhysics.length > 0) return;
+      this.createBoundaryWallPhysics();
+    } else {
+      // すべて dispose して空に
+      for (const physics of this.boundaryWallPhysics) {
+        physics.dispose();
+      }
+      this.boundaryWallPhysics = [];
     }
   }
 

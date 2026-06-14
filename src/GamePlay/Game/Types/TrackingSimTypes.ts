@@ -34,6 +34,8 @@ export interface SimMover {
   ability?: SimPlayerAbility;
   /** Phase H.4.4: 累積疲労 0..100 (試合中に蓄積、休憩で減少) */
   fatigue?: number;
+  /** Phase H.9: 場外許可フラグ (インバウンダーが壁外に立てる) */
+  outOfBoundsExempt?: boolean;
 }
 
 export interface SimBall {
@@ -235,6 +237,13 @@ export interface SimState {
   score: TrackingSimScore;
   cooldown: number;
   onBallEntityIdx: number;
+  /**
+   * Phase H.23: on-ball 移行直後の settle (減速・姿勢落ち着き) タイマー (秒)。
+   *   保持者切替 (catch 確定 / loose ball 回収) で 0.3 にセット。
+   *   >0 の間は moveOnBallSmart / moveOnBallDrive を呼ばず、vx/vz を 0.5× 減衰のみ。
+   *   ロール再評価 (findOpenSpaceInZone 等) 由来のワープを抑止。
+   */
+  onBallSettleTimer: number;
   selectedReceiverEntityIdx: number;
   preFire: SimPreFireInfo | null;
   interceptPt: { x: number; z: number } | null;
@@ -299,4 +308,15 @@ export interface SimState {
   schemeDefenseInstructions: { entityIdx: number; dest: { x: number; z: number } | null; speedMult: number; priority: number; label?: string }[];
   /** Phase H.5: 現フレームのトランジション指示 */
   schemeTransitionInstructions: { entityIdx: number; dest: { x: number; z: number } | null; speedMult: number; priority: number; label?: string }[];
+  /** Phase H.9: インバウンド中フラグ */
+  inboundActive: boolean;
+  /** インバウンド残り秒 (5秒で violation) */
+  inboundTimer: number;
+  /** インバウンダーのオフェンス相対インデックス (0=launcher PG) */
+  inboundInbounderRelIdx: number;
+  /** Phase H.9: ティップオフ中フラグ (試合開始・OT 開始時のみ) */
+  tipOffActive: boolean;
+  tipOffTimer: number;
+  /** Phase H.14: ディフェンダーが spawn 位置へ全力リトリート中フラグ (5 人分) */
+  obRetreatingToSpawn: boolean[];
 }

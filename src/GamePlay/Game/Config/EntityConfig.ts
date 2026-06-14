@@ -6,6 +6,14 @@ export const LAUNCHER_SPEED = 60 * S;               // 0.90
 export const TARGET_RANDOM_SPEED = 80 * S;           // 1.20
 export const TARGET_INTERCEPT_SPEED = 180 * S;       // 2.70
 export const BALL_SPEED = 250 * S;                   // 3.75
+// Phase H.17: オフェンス全力ダッシュ速度 (defender と同じ base = 4.5 m/s)
+//   各ロールの offenseRank (1-5) → getSprintSpeedMult で補正される
+export const OFFENSE_FULL_SPRINT_SPEED = 4.5;        // 4.50 m/s base
+// Phase H.25: on-ball ドリブル時の base 速度 (jog 相当)
+//   LAUNCHER_SPEED 0.90 や TARGET_RANDOM_SPEED 1.20 だと walking 以下で
+//   NBA 選手が「のんびり歩く」ような状態になっていたため大幅引き上げ。
+//   sprint (4.5) より少し遅め、defender intercept (2.70) と同程度。
+export const ON_BALL_DRIBBLE_SPEED = 2.7;            // 2.70 m/s
 
 // --- Colors ---
 export const TARGET_COLORS_3D = [

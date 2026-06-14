@@ -25,34 +25,27 @@ import {
   moveDunker,
   moveTransitToHome,
 } from "../Movement/RoleMovement";
+import { motionDashTo, motionSprintTo } from "../Movement/MotionLayer";
 import { updateScan } from "../Decision/ScanSystem";
 import { canEntityMove, applyMoveAction } from "./SimActionManager";
 import { OB_CONFIGS } from "../Decision/ObstacleRoleAssignment";
-import { TARGET_RANDOM_SPEED } from "../Config/EntityConfig";
-import { moveWithFacing } from "../Movement/MovementCore";
 import { getLowPostLeft, getLowPostRight } from "../Court/CourtSpots";
+import { ROLE_ASSIGNMENTS, getMirroredRole } from "../Decision/OffenseRoleAssignment";
+import { OFFENSE_FULL_SPRINT_SPEED } from "../Config/EntityConfig";
+import { isInPaint } from "../Config/GoalConfig";
 
 // Re-export from ObstacleDefenseAI for backwards compatibility
 export { computePushObstructions, updateObstacleMovements } from "./ObstacleDefenseAI";
 
 /**
- * Phase H.5: dest 指示に従って移動する。応答距離 0.15m 未満なら停止。
- * @returns true if moved (false = within tolerance / idle)
+ * Phase H.20: AI が指定した dest へ motion 層 (motionDashTo) で移動。
+ * インバウンド受け手 / OREB クラッシュ / カット / scheme 指示の共通モーション。
+ * @returns 常に true (移動を試みたという意味、到達判定は呼び出し側で別途)
  */
 function applyDestMovement(
   mover: SimMover, dest: { x: number; z: number }, speedMult: number, dt: number,
 ): boolean {
-  const dx = dest.x - mover.x;
-  const dz = dest.z - mover.z;
-  const d = Math.sqrt(dx * dx + dz * dz);
-  if (d < 0.15) {
-    mover.vx = 0; mover.vz = 0;
-    return true;
-  }
-  const speed = TARGET_RANDOM_SPEED * Math.max(0.1, speedMult);
-  mover.vx = (dx / d) * speed;
-  mover.vz = (dz / d) * speed;
-  moveWithFacing(mover, speed, dt);
+  motionDashTo(mover, dest, speedMult, dt);
   return true;
 }
 
@@ -74,13 +67,8 @@ export function updateTargetRoleMovements(state: SimState, dt: number, skipIdx: 
       continue;
     }
 
-    // Transit mode: move toward home position, skip role movement
-    if (state.offenseInTransit[offRelIdx]) {
-      const arrived = moveTransitToHome(targets[ti], offRelIdx, dt, state.zSign);
-      if (arrived) state.offenseInTransit[offRelIdx] = false;
-      applyMoveAction(state, absIdx, targets[ti], dt);
-      continue;
-    }
+    // Phase H.16: transit ロジックは override の後に移動
+    // (override = OREB クラッシュ / カット / scheme / インバウンド受け手)
 
     // 移動前の位置を保存（プッシュ減衰用）
     const prevX = targets[ti].x;
@@ -91,9 +79,54 @@ export function updateTargetRoleMovements(state: SimState, dt: number, skipIdx: 
     const offAbs = state.offenseBase + offRel;
     let movedByOverride = false;
 
+    // 優先 -1 (Phase H.26): paint 3秒違反 emergency exit。
+    //   paintTime > 1.5s なら他の全 override より優先で home へ全力 sprint。
+    //   on-ball player はそもそも paintTime 蓄積しない (ViolationDetector で exempt) ので
+    //   このブランチは off-ball player 専用。
+    //   1.5s から 1.5s 残しで sprint 4.5m/s なら 6.75m 移動可能 → paint (5.79m深) 確実に脱出。
+    const paintTimeForEmergency = state.violationState.paintTimePerOffense[offRel] ?? 0;
+    if (paintTimeForEmergency > 1.5) {
+      const baseRole = ROLE_ASSIGNMENTS.targets[ti];
+      const role = getMirroredRole(baseRole, state.zSign);
+      motionSprintTo(targets[ti], { x: role.homeX, z: role.homeZ }, OFFENSE_FULL_SPRINT_SPEED, dt);
+      movedByOverride = true;
+    }
+
+    // 優先 0: インバウンド中 → 最寄りオフェンスがレシーブ位置へ
+    // Phase H.9: インバウンダーから 4m 程度の court inside にレシーバーを配置
+    if (state.inboundActive) {
+      // インバウンダーを除いて最寄りの相対 idx を計算
+      const inbounder = state.launcher; // relIdx=0 が inbounder
+      const targetsDistsFromInbounder = state.targets.map(t => {
+        const dx = t.x - inbounder.x;
+        const dz = t.z - inbounder.z;
+        return Math.sqrt(dx * dx + dz * dz);
+      });
+      // 最も近い target idx
+      let nearestIdx = 0;
+      let nearestDist = Infinity;
+      for (let i = 0; i < targetsDistsFromInbounder.length; i++) {
+        if (targetsDistsFromInbounder[i] < nearestDist) {
+          nearestDist = targetsDistsFromInbounder[i];
+          nearestIdx = i;
+        }
+      }
+      if (ti === nearestIdx) {
+        // Phase H.15: 符号修正
+        // レシーブ位置: インバウンダーから court 中心方向に 4m 入った位置
+        const zSign: 1 | -1 = state.attackGoalZ > 0 ? 1 : -1;
+        // インバウンダーは -zSign 側のベースライン外 (例: zSign=-1 で z=+14.325)
+        // レシーバーは court 中心方向 (zSign 方向) に 4m
+        const inboundBaselineZ = -zSign * 14.325;
+        const receiveZ = inboundBaselineZ + zSign * 4.0; // court 中心へ 4m
+        const receiveX = 2.5;
+        movedByOverride = applyDestMovement(targets[ti], { x: receiveX, z: receiveZ }, 1.3, dt);
+      }
+    }
+
     // 優先 1: ショット飛行中 → C / PF はリム周辺へクラッシュ (OREB 準備)
     // ti=2 (C) → ローポスト左、ti=3 (PF) → ローポスト右 (RoleSpots 由来の名前付き定義)
-    if (state.ballActive && !state.interceptPt && !state.looseBall && (ti === 2 || ti === 3)) {
+    if (!movedByOverride && state.ballActive && !state.interceptPt && !state.looseBall && (ti === 2 || ti === 3)) {
       const zSign: 1 | -1 = state.attackGoalZ > 0 ? 1 : -1;
       const crashSpot = ti === 2 ? getLowPostLeft(zSign) : getLowPostRight(zSign);
       movedByOverride = applyDestMovement(targets[ti], { x: crashSpot.x, z: crashSpot.z }, 1.4, dt);
@@ -107,10 +140,18 @@ export function updateTargetRoleMovements(state: SimState, dt: number, skipIdx: 
       }
     }
 
-    // 優先 3: トランジション or オフェンス scheme 指示 (閾値 priority ≥7 でセットプレーのみ)
-    // ※ Motion Offense (priority 5-6) は Greedy 再評価でワープを誘発するため除外。
-    //   既存ロール AI (findOpenSpaceInZone) がスペーシングを担当する。
-    //   PnR / Spain / DHO (priority 7-8) のみ override 可。
+    // 優先 3: Phase H.17 — transit mode (ターンオーバー後・ポゼッション切替後の全力ダッシュ)
+    //   off-ball プレイヤーが offenseRank (1-5) で補正済の sprint (4.5 m/s × 0.80-1.00) で
+    //   home position へ向かう。scheme override より優先 (sprint させたい意図のため)。
+    //   rank 5 (PF) = 1.00x 速度・1.0m 厳格、rank 1 (PG) = 0.80x 速度・3.0m アバウト。
+    if (!movedByOverride && state.offenseInTransit[offRelIdx]) {
+      const arrived = moveTransitToHome(targets[ti], offRelIdx, dt, state.zSign);
+      if (arrived) state.offenseInTransit[offRelIdx] = false;
+      movedByOverride = true;
+    }
+
+    // 優先 4: トランジション or オフェンス scheme 指示 (transit が終わった後の set play)
+    //   PnR / Spain / DHO (priority 7-8) のみ override 可。Motion (priority 5-6) は除外。
     if (!movedByOverride) {
       const transIns = state.schemeTransitionInstructions.find(i => i.entityIdx === offAbs && i.priority >= 7);
       if (transIns && transIns.dest) {
@@ -123,27 +164,29 @@ export function updateTargetRoleMovements(state: SimState, dt: number, skipIdx: 
       }
     }
 
-    // 既存ロール移動 (override が無い場合)
+    // 既存ロール移動 (override も transit も無い場合)
     if (!movedByOverride) {
       const others = getOtherTargets(ti);
+      // Phase H.12: 3秒違反回避用の paint 蓄積時間を取得
+      const paintTime = state.violationState.paintTimePerOffense[offRel] ?? 0;
       switch (ti) {
         case 0: {
           const res = moveSecondHandler(
             targets[0], state.targetDests[0], state.targetReevalTimers[0],
-            dt, launcher, obstacles, others, state.zSign,
+            dt, launcher, obstacles, others, state.zSign, paintTime,
           );
           state.targetDests[0] = res.dest;
           state.targetReevalTimers[0] = res.reevalTimer;
           break;
         }
         case 1:
-          moveSlasher(targets[1], state.slasherState, dt, launcher, obstacles, others, state.zSign);
+          moveSlasher(targets[1], state.slasherState, dt, launcher, obstacles, others, state.zSign, paintTime);
           break;
         case 2:
-          moveScreener(targets[2], state.screenerState, dt, launcher, obstacles, others, state.zSign);
+          moveScreener(targets[2], state.screenerState, dt, launcher, obstacles, others, state.zSign, paintTime);
           break;
         case 3:
-          moveDunker(targets[3], state.dunkerState, dt, launcher, obstacles, others, state.zSign);
+          moveDunker(targets[3], state.dunkerState, dt, launcher, obstacles, others, state.zSign, paintTime);
           break;
       }
     }

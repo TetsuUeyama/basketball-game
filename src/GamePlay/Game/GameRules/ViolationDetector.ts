@@ -60,9 +60,14 @@ export function tickViolations(
     halfcourtCrossed: false,
   };
 
-  // --- 3秒ルール ---
+  // --- 3秒ルール (NBA: ボール保持者は除外) ---
   const goalSide: 1 | -1 = attackGoalZ > 0 ? 1 : -1;
   for (let i = 0; i < offensePositions.length; i++) {
+    // Phase H.15: NBA 公式ルール準拠 — ボール保持者は 3 秒違反対象外
+    if (i === onBallEntityRelIdx) {
+      state.paintTimePerOffense[i] = 0;
+      continue;
+    }
     const p = offensePositions[i];
     const inPaint = isInPaintForGoal(p.x, p.z, goalSide);
     if (inPaint) {

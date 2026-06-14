@@ -24,6 +24,18 @@ export interface ActionScorerContext {
   offBallIntents: (OffBallIntentEntry | null)[]; // レシーバーの intent 参照用
   /** Phase H.1.4: 現在のショットクロック残り秒数 (undefined なら未考慮) */
   shotClockRemaining?: number;
+  /** Phase H.9: インバウンド中かどうか (true なら強制的にパス優先) */
+  inboundActive?: boolean;
+  /** Phase H.15: バックコート滞在秒 (8秒違反回避) */
+  backcourtTimer?: number;
+  /** Phase H.15: ハーフコート越え済みか */
+  hasCrossedHalfcourt?: boolean;
+  /** Phase H.15: 攻撃ゴール Z (frontcourt 判定用) */
+  attackGoalZ?: number;
+  /** Phase H.26: 各オフェンス相対 0-4 の paint 滞在秒
+   *   on-ball の AI が「味方の paint 3秒違反が近い」を認識して
+   *   passPaintRescue / shootPaintRescue / holdPaintAvoid が発火する。 */
+  teammatePaintTimes?: number[];
 }
 
 // --- ScoreFactor (拡張ポイント) ---

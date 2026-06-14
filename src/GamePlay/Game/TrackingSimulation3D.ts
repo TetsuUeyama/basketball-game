@@ -27,6 +27,7 @@ import {
 import {
   LAUNCHER_SPEED,
   TARGET_RANDOM_SPEED,
+  OFFENSE_FULL_SPRINT_SPEED,
   SOLVER_CFG_3D,
   INIT_LAUNCHER,
   INIT_TARGETS,
@@ -61,6 +62,11 @@ import {
   isDriveLaneClear,
   moveTransitToHome,
 } from "./Movement/RoleMovement";
+import {
+  motionSprintTo,
+  motionDribbleTo,
+  motionSettle,
+} from "./Movement/MotionLayer";
 import { tickJumpPhysics, startJump } from "./Action/JumpPhysics";
 import { shouldAttemptBlock, BLOCK_TIMING } from "./Action/BlockAction";
 import { BLOCK_JUMP_VY } from "./Config/JumpConfig";
@@ -147,6 +153,7 @@ function randomHeightForPosition(posIdx: number): number {
 import { SimPlayerStateManager } from "./State/SimPlayerStateManager";
 import { OB_CONFIGS, OBSTACLE_COUNT } from "./Decision/ObstacleRoleAssignment";
 import { Ball } from "@/GamePlay/Object/Entities/Ball";
+import type { Field } from "@/GamePlay/Object/Entities/Field";
 import { OffBallIntentManager } from "./Decision/OffBallIntent";
 import { buildOnBallContext, evaluateActions } from "./Decision/ActionScorer";
 
@@ -179,6 +186,7 @@ function getReceiverInfo(state: SimState): { movers: SimMover[]; entityIndices: 
 export class TrackingSimulation3D {
   private scene: Scene;
   private ball: Ball;
+  private field: Field | null;
   private observer: Observer<Scene> | null = null;
   private vis: SimVisualization;
   private playerStateManager: SimPlayerStateManager;
@@ -221,9 +229,10 @@ export class TrackingSimulation3D {
   /** ブロック試行時のシューティングファウル確率 (per shot, not per frame) */
   private static readonly SHOOTING_FOUL_PROB = 0.12;
 
-  constructor(scene: Scene, ball: Ball) {
+  constructor(scene: Scene, ball: Ball, field?: Field) {
     this.scene = scene;
     this.ball = ball;
+    this.field = field ?? null;
     this.ball.mesh.setEnabled(false);
     this.vis = new SimVisualization(scene);
     this.playerStateManager = new SimPlayerStateManager();
@@ -240,7 +249,27 @@ export class TrackingSimulation3D {
       const dt = Math.min((now - this.prevTime) / 1000, 0.1);
       this.prevTime = now;
       this.lastDt = dt;
+      // Phase H.21: update 前の位置スナップショット
+      const before: { x: number; z: number }[] = this.state.allPlayers.map(p => ({ x: p.x, z: p.z }));
       this.update(dt);
+      // Phase H.21: update 後にワープ (>0.5m/frame) 検出
+      const sprintCap = 4.5 * dt + 0.05; // 全力 sprint でも到達不可能な距離
+      for (let i = 0; i < this.state.allPlayers.length; i++) {
+        const p = this.state.allPlayers[i];
+        const dx = p.x - before[i].x;
+        const dz = p.z - before[i].z;
+        const d = Math.sqrt(dx * dx + dz * dz);
+        if (d > Math.max(0.5, sprintCap)) {
+          const ownership = i === this.state.offenseBase + this.state.onBallEntityIdx ? 'ON-BALL' : '';
+          const team = i < 5 ? 'A' : 'B';
+          const role = i % 5 === 0 ? 'PG' : i % 5 === 1 ? 'SG' : i % 5 === 2 ? 'SF' : i % 5 === 3 ? 'C' : 'PF';
+          console.warn(
+            `[WARP DETECT] PL${i} (Team${team}/${role}) ${ownership} jumped ${d.toFixed(2)}m in dt=${dt.toFixed(3)}s | ` +
+            `from (${before[i].x.toFixed(2)},${before[i].z.toFixed(2)}) → (${p.x.toFixed(2)},${p.z.toFixed(2)}) | ` +
+            `inboundActive=${this.state.inboundActive} possession=${this.state.possession}`,
+          );
+        }
+      }
       this.syncMeshes();
     });
   }
@@ -289,6 +318,35 @@ export class TrackingSimulation3D {
 
   public getTacticalMode(): { mode: 'team' | 'individual' | 'transition'; reason: string } {
     return { mode: this.state.tacticalMode, reason: this.state.tacticalReason };
+  }
+
+  /** Phase H.13: 3秒/8秒違反タイマー状態を UI に公開 */
+  public getViolationStatus(): {
+    maxPaintTime: number;      // オフェンス 5 人のうち最大 paint 蓄積秒
+    maxPaintPlayerIdx: number; // 最大の player abs idx (-1 = なし)
+    backcourtTimer: number;    // バックコート滞在秒
+    hasCrossedHalfcourt: boolean;
+    threeSecondLimit: number;  // 3.0
+    backcourtLimit: number;    // 8.0
+  } {
+    const s = this.state;
+    let maxPaintTime = 0;
+    let maxPaintIdx = -1;
+    for (let i = 0; i < s.violationState.paintTimePerOffense.length; i++) {
+      const t = s.violationState.paintTimePerOffense[i];
+      if (t > maxPaintTime) {
+        maxPaintTime = t;
+        maxPaintIdx = s.offenseBase + i;
+      }
+    }
+    return {
+      maxPaintTime,
+      maxPaintPlayerIdx: maxPaintIdx,
+      backcourtTimer: s.violationState.backcourtTimer,
+      hasCrossedHalfcourt: s.violationState.hasCrossedHalfcourt,
+      threeSecondLimit: 3.0,
+      backcourtLimit: 8.0,
+    };
   }
 
   public getActiveSchemes(): {
@@ -443,6 +501,7 @@ export class TrackingSimulation3D {
       score: { hit: 0, block: 0, miss: 0, steal: 0, goal: 0, shotMiss: 0 },
       cooldown: 2.0,
       onBallEntityIdx: 0,
+      onBallSettleTimer: 0,
       selectedReceiverEntityIdx: 1,
       preFire: null,
       interceptPt: null,
@@ -500,6 +559,12 @@ export class TrackingSimulation3D {
       schemeOffenseInstructions: [],
       schemeDefenseInstructions: [],
       schemeTransitionInstructions: [],
+      inboundActive: false,
+      inboundTimer: 0,
+      inboundInbounderRelIdx: 0,
+      tipOffActive: false,
+      tipOffTimer: 0,
+      obRetreatingToSpawn: [false, false, false, false, false],
     };
 
     // ゲームクロック・ショットクロック・ファウル・アロー・スタッツをリセット
@@ -519,6 +584,52 @@ export class TrackingSimulation3D {
 
     // スキャンメモリを実際の offense 位置で初期化（zSign 対応）
     this.resetDefenseScanState();
+
+    // Phase H.9: 試合開始時はティップオフ
+    this.state.tipOffActive = true;
+    this.state.tipOffTimer = 2.0;
+  }
+
+  // =========================================================================
+  // Phase H.9: スローイン (インバウンド) + ティップオフ
+  // =========================================================================
+
+  /**
+   * ゴール後のスローインモード開始。
+   * Phase H.20: AI 層は状態のみセット。実際の baseline 移動はモーション層 (motionSprintTo)。
+   *   テレポート (.x/.z への直接代入) は廃止 — レイヤー分離原則:
+   *   AI(意思決定) → Motion(sprint/dash/dribble/walk) → Tactics(戦術)。
+   */
+  private startInbound(): void {
+    const s = this.state;
+    s.inboundInbounderRelIdx = 0;
+    s.onBallEntityIdx = 0;
+    s.launcher.vx = 0;
+    s.launcher.vz = 0;
+    s.launcher.outOfBoundsExempt = true;
+    s.inboundActive = true;
+    s.inboundTimer = 8.0; // PG が baseline まで sprint する時間 + pass する時間
+    s.cooldown = 0.3;
+    this.field?.setBoundaryWallsEnabled(false);
+    this.setLastEvent('Inbound — PG sprinting to baseline');
+    this.logEvent('out-of-bounds', `Inbound from baseline (8s)`, s.possession);
+  }
+
+  /**
+   * インバウンドを終了し、PG を壁内に戻し outOfBoundsExempt を解除。
+   * 境界壁の物理も再有効化する。
+   */
+  private endInbound(reason: 'pass-made' | 'violation'): void {
+    const s = this.state;
+    s.inboundActive = false;
+    s.launcher.outOfBoundsExempt = false;
+    // Phase H.9: 境界壁の物理を再有効化 (通常プレイ中はボール場外流出防止)
+    this.field?.setBoundaryWallsEnabled(true);
+    if (reason === 'violation') {
+      this.setLastEvent('5-Second Inbound Violation — Turnover');
+      this.logEvent('violation', '5-second inbound violation', s.possession);
+      this.handleTurnover(s.offenseBase);
+    }
   }
 
   /**
@@ -557,6 +668,9 @@ export class TrackingSimulation3D {
 
     // DF スキャン状態をフレッシュに初期化（チーム間非対称性を排除）
     this.resetDefenseScanState();
+
+    // Phase H.14: 全 defender に「spawn へ全力リトリート中」フラグをセット
+    for (let i = 0; i < s.obRetreatingToSpawn.length; i++) s.obRetreatingToSpawn[i] = true;
 
     s.onBallEntityIdx = 0;
     s.selectedReceiverEntityIdx = 1;
@@ -875,6 +989,11 @@ export class TrackingSimulation3D {
     // === 累積シミュレーション時間 (アシスト窓判定用) ===
     s.simTimeAccum += dt;
 
+    // === Phase H.23: on-ball settle タイマー減衰 ===
+    if (s.onBallSettleTimer > 0) {
+      s.onBallSettleTimer = Math.max(0, s.onBallSettleTimer - dt);
+    }
+
     // === Phase H.4.1: 戦術プライオリティ評価 (毎フレーム) ===
     const tactical = evaluateTacticalPriority({
       state: s,
@@ -1043,9 +1162,36 @@ export class TrackingSimulation3D {
         this.intentManager.reset();
         this.shotClock.reset(24);
         resetViolationsOnPossessionChange(s.violationState);
+        s.possessionStartTime = s.simTimeAccum;
         s.cooldown = 2.0;
+        // Phase H.9: ゴール後はスローインから開始
+        this.startInbound();
       }
       return; // タイマー中は他の処理をスキップ
+    }
+
+    // === Phase H.9: スローイン (インバウンド) tick ===
+    if (s.inboundActive) {
+      s.inboundTimer -= dt;
+      // インバウンダー以外のボール所持 (パス成功) で終了
+      const inbounderHasBall = s.onBallEntityIdx === s.inboundInbounderRelIdx;
+      if (!inbounderHasBall) {
+        this.endInbound('pass-made');
+      } else if (s.inboundTimer <= 0) {
+        this.endInbound('violation');
+        return;
+      }
+    }
+
+    // === Phase H.9: ティップオフ tick ===
+    if (s.tipOffActive) {
+      s.tipOffTimer -= dt;
+      if (s.tipOffTimer <= 0) {
+        s.tipOffActive = false;
+        this.setLastEvent('Tip Off — Game start');
+      }
+      // ティップオフ中は他の更新を止めず、cooldown だけ若干長めに
+      // (実機テスト: 単純に演出のみとして扱い)
     }
 
     // === Tick action states ===
@@ -1119,6 +1265,10 @@ export class TrackingSimulation3D {
         // Reset on-ball target state for the new ball holder
         s.onBallTargetState = { dest: null, reevalTimer: 0, bestPassTargetIdx: 0 };
 
+        // Phase H.23: settle 状態 — 0.3s は moveOnBallSmart を呼ばず減速のみ。
+        //   キャッチ位置がロールゾーン外でも、いきなり戦術移動でワープしないようにする。
+        s.onBallSettleTimer = 0.3;
+
         // intent チェック → 有効なら cooldown = 0 で即行動、無効でも 0.3s で判断開始
         const intent = this.intentManager.consumeIntent(s, catcherIdx);
         s.cooldown = intent ? 0 : 0.3;
@@ -1169,9 +1319,42 @@ export class TrackingSimulation3D {
         const prevLX = s.launcher.x, prevLZ = s.launcher.z;
 
         if (canEntityMove(s.actionStates, s.offenseBase)) {
-          if (s.offenseInTransit[0]) {
+          // Phase H.26: paint 3秒違反 emergency exit (off-ball launcher 用)
+          //   launcher が off-ball (pass 後など) で paint 滞在 > 1.5s なら home へ全力 sprint。
+          //   on-ball launcher は paintTime が 0 にリセットされ続けるのでこの分岐は発火しない。
+          const launcherPaintTime = s.violationState.paintTimePerOffense[0] ?? 0;
+          if (!launcherIsOnBall && launcherPaintTime > 1.5) {
+            const launcherRole = getMirroredRole(ROLE_ASSIGNMENTS.launcher, s.zSign);
+            motionSprintTo(s.launcher, { x: launcherRole.homeX, z: launcherRole.homeZ }, OFFENSE_FULL_SPRINT_SPEED, dt);
+          } else
+          // Phase H.23: on-ball 移行直後の settle (減速のみ、戦術 dest 評価をスキップ)
+          //   キャッチ位置や回収位置からのワープを防止。
+          if (launcherIsOnBall && s.onBallSettleTimer > 0) {
+            motionSettle(s.launcher, dt);
+          } else
+          // Phase H.20: AI 層は dest と「sprint」のみ宣言、motion 層 (motionSprintTo) が実位置更新
+          //   レイヤー分離: AI(意思決定) → Motion(sprint/dash/dribble) → Tactics(戦術)
+          if (s.inboundActive && s.inboundInbounderRelIdx === 0) {
+            // AI: inbounder は baseline 外へ sprint
+            const inboundZ = -s.zSign * (14.325 + 0.4);
+            const arrived = motionSprintTo(s.launcher, { x: 0, z: inboundZ }, OFFENSE_FULL_SPRINT_SPEED, dt);
+            if (arrived) {
+              s.launcher.facing = Math.atan2(s.zSign, 0);
+            }
+          } else if (!launcherIsOnBall && s.offenseInTransit[0]) {
+            // Phase H.16 修正: transit は off-ball プレイヤーのみ (on-ball は通常ロジック)
             const arrived = moveTransitToHome(s.launcher, 0, dt, s.zSign);
             if (arrived) s.offenseInTransit[0] = false;
+          } else if (
+            // Phase H.13: 8秒違反回避 — ボール保持者がバックコートにいて 5s 経過 → 強制ハーフコート越え
+            launcherIsOnBall
+            && !s.violationState.hasCrossedHalfcourt
+            && s.violationState.backcourtTimer > 5.0
+          ) {
+            // AI: ハーフコート越え位置 (z = zSign * 2.0) へ全力 sprint で加速
+            // Phase H.25: TARGET_RANDOM_SPEED*1.4 (1.68m/s) → OFFENSE_FULL_SPRINT_SPEED (4.5m/s)
+            //   旧速度では 8秒制限内にハーフコート越えできず違反頻発
+            motionDribbleTo(s.launcher, { x: 0, z: s.zSign * 2.0 }, OFFENSE_FULL_SPRINT_SPEED, dt);
           } else if (launcherIsOnBall && !this.catchHoldInfo && isDriveLaneClear(s.launcher, s.obstacles)) {
             moveOnBallDrive(s.launcher, dt);
           } else {
@@ -1235,9 +1418,19 @@ export class TrackingSimulation3D {
           const prevTX = onBallTgt.x, prevTZ = onBallTgt.z;
 
           if (canEntityMove(s.actionStates, s.offenseBase + s.onBallEntityIdx)) {
-            if (s.offenseInTransit[s.onBallEntityIdx]) {
-              const arrived = moveTransitToHome(onBallTgt, s.onBallEntityIdx, dt, s.zSign);
-              if (arrived) s.offenseInTransit[s.onBallEntityIdx] = false;
+            // Phase H.23: on-ball 移行直後の settle (減速のみ)
+            if (s.onBallSettleTimer > 0) {
+              motionSettle(onBallTgt, dt);
+            } else
+            // Phase H.16 修正: on-ball target は transit せず通常の on-ball ロジック
+            // (sprint で home に向かうのは off-ball player のみ)
+            if (
+              // 8秒違反回避 (on-ball target がバックコート滞在中)
+              !s.violationState.hasCrossedHalfcourt
+              && s.violationState.backcourtTimer > 5.0
+            ) {
+              // ハーフコート越えへ全力 sprint (Phase H.25: 1.68 → 4.5 m/s)
+              motionDribbleTo(onBallTgt, { x: 0, z: s.zSign * 2.0 }, OFFENSE_FULL_SPRINT_SPEED, dt);
             } else if (isDriveLaneClear(onBallTgt, s.obstacles)) {
               moveOnBallDrive(onBallTgt, dt);
             } else {
@@ -1296,7 +1489,13 @@ export class TrackingSimulation3D {
               s.moveDistAccum[s.onBallEntityIdx] = 0;
             } else if (scorerResult.bestAction === 'pass') {
               const anyInTransit = s.offenseInTransit.some(t => t);
-              if (!anyInTransit) {
+              // Phase H.18: インバウンド中は PG が baseline (|z|≈14.7) に sprint 到達後のみ pass
+              //   (AI 層は pass 意図を持つが、モーション層で baseline 未着なら待機)
+              const inboundReady = !s.inboundActive || (
+                Math.abs(s.launcher.z - (-s.zSign * 14.725)) <= 0.7
+                && Math.abs(s.launcher.x) <= 1.2
+              );
+              if ((!anyInTransit || s.inboundActive) && inboundReady) {
                 const fireResult = attemptFire(ctx, evalResult.selectedTargetIdx, SOLVER_CFG_3D);
                 if (fireResult.fired && fireResult.solution) {
                   fireResult.solution.targetIdx = receiverEntityIndices[fireResult.solution.targetIdx];
@@ -1310,6 +1509,9 @@ export class TrackingSimulation3D {
                 } else {
                   s.cooldown = fireResult.newCooldown;
                 }
+              } else {
+                // anyInTransit で attemptFire を呼べないとき: cooldown を進めて次フレーム再評価
+                s.cooldown = 0.2;
               }
             } else {
               // hold → 0.1s 後に再評価
@@ -1348,6 +1550,8 @@ export class TrackingSimulation3D {
             // オフェンスがルーズボール回収 → possession 維持、ショットクロック 14 秒リセット
             resetAfterResult(s);
             s.onBallEntityIdx = lbResult.recoveredEntityIdx;
+            // Phase H.23: 回収位置から戦術移動への遷移をスムーズ化 (settle 0.3s)
+            s.onBallSettleTimer = 0.3;
             s.cooldown = 1.5;
             for (let i = 0; i < s.offenseInTransit.length; i++) s.offenseInTransit[i] = true;
             this.intentManager.reset();
@@ -1368,9 +1572,13 @@ export class TrackingSimulation3D {
             // switchPossession 後、新 aliases で resetAfterResult を呼ぶ
             resetAfterResult(s);
             this.resetDefenseScanState();
-            // switchPossession 後、新offenseBase は元のdefenseBase
-            s.onBallEntityIdx = absIdx - s.offenseBase;
-            s.cooldown = 0.5;
+            // Phase H.19: 回収者を on-ball にすると敵陣付近 (回収位置 = ボール飛行軌道上)
+            //   で即シュート可能となり「ワープ」に見えるため、PG (launcher) を on-ball に統一。
+            //   handleTurnover と同じ扱い (新オフェンスは必ず PG がボール保持)。
+            s.onBallEntityIdx = 0;
+            // Phase H.23: 新 PG が on-ball ロジックに乗る前に 0.3s settle
+            s.onBallSettleTimer = 0.3;
+            s.cooldown = 1.0; // PG にボールが渡るまでの outlet 時間相当
             // ファストブレイク: 位置リセットなし、トランジットモードで新ロールへ
             for (let i = 0; i < s.offenseInTransit.length; i++) s.offenseInTransit[i] = true;
             this.intentManager.reset();
@@ -1434,6 +1642,8 @@ export class TrackingSimulation3D {
             this.logEvent('turnover', `PL${passerAbs} pass OOB/timeout turnover`, s.possession);
             switchPossession(s);
             s.onBallEntityIdx = 0;
+            // Phase H.23: 新 PG settle
+            s.onBallSettleTimer = 0.3;
             this.resetAfterPossessionSwitch();
             this.intentManager.reset();
             this.shotClock.reset(24);

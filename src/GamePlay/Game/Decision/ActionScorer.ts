@@ -90,6 +90,12 @@ export function buildOnBallContext(
     anyInTransit: state.offenseInTransit.some(t => t),
     offBallIntents,
     shotClockRemaining,
+    inboundActive: state.inboundActive,
+    backcourtTimer: state.violationState.backcourtTimer,
+    hasCrossedHalfcourt: state.violationState.hasCrossedHalfcourt,
+    attackGoalZ: state.attackGoalZ,
+    // Phase H.26: 味方の paint 滞在秒を AI 判断に流す
+    teammatePaintTimes: state.violationState.paintTimePerOffense.slice(),
   };
 }
 

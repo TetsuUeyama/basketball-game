@@ -20,6 +20,7 @@ import {
   PUSH_ACTIVATION_DIST, PUSH_DENY_OFFSET, PUSH_DENY_HOVER,
   DEFENSE_ENGAGE_Z, DEFENSE_GOAL_OFFSET, SPRINT_TRIGGER_DIST,
   BEATEN_GOAL_DIST_MARGIN,
+  OBSTACLE_FULL_SPRINT_SPEED,
 } from "../Config/DefenseConfig";
 // state.attackGoalX/Z は state.attackGoalX/Z 経由で動的取得
 import { OB_CONFIGS } from "../Decision/ObstacleRoleAssignment";
@@ -160,6 +161,15 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
   // --- Phase 1: フリー選手検出 + ヘルプ割り当て ---
   const helpOverrides = computeHelpAssignments(state, allOffense);
 
+  // --- Phase 1.5: トランジション "behind the play" 判定 ---
+  // Phase H.10: ボールホルダーが defender より自陣ゴール (offense の attackGoal) に近ければ
+  //   defender は「置いて行かれている」状態。全力で自陣へ retreat する。
+  const onBallMover = allOffense[state.onBallEntityIdx];
+  const onBallToAttackGoal = dist2d(
+    onBallMover.x, onBallMover.z,
+    state.attackGoalX, state.attackGoalZ,
+  );
+
   // --- Phase 2: 各DFの移動 ---
   for (let oi = 0; oi < OB_CONFIGS.length; oi++) {
     const cfg = OB_CONFIGS[oi];
@@ -170,7 +180,6 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
       const obEntityIdx = state.defenseBase + oi;
       const blockAction = state.actionStates[obEntityIdx];
       if (blockAction?.type === 'block') {
-        const onBallMover = allOffense[state.onBallEntityIdx];
         orientToward(ob, onBallMover.x, onBallMover.z, dt);
       }
       // momentum がない場合のみフォールバック（静止ジャンプ等）
@@ -178,6 +187,41 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
         moveWithFacing(ob, cfg.idleSpeed * JUMP_HORIZONTAL_MULT, dt);
       }
       continue;
+    }
+
+    // Phase H.10 / H.10b / H.14: 全力ダッシュ リトリート判定
+    //   trigger 条件 (いずれか満たせば retreat フラグを立てる):
+    //     (A) behindThePlay: ボールホルダーの方が defender より自陣ゴールに近い
+    //     (B) inWrongHalf:   defender が自陣の反対側 (前ポゼッションの攻撃側) にいる
+    //   フラグが立っている間は spawn 位置 (INIT_OBSTACLES mirrored) まで全力ダッシュ。
+    //   spawn に到達 (1m 以内) でフラグクリア → 通常 mark ロジックへ。
+    const obToOwnGoal = dist2d(
+      ob.x, ob.z,
+      state.attackGoalX, state.attackGoalZ,
+    );
+    const behindThePlay = obToOwnGoal > onBallToAttackGoal + 1.0;
+    const inWrongHalf = state.attackGoalZ * ob.z < -0.5;
+    if (behindThePlay || inWrongHalf) {
+      state.obRetreatingToSpawn[oi] = true;
+    }
+    if (state.obRetreatingToSpawn[oi]) {
+      const spawn = INIT_OBSTACLES[oi];
+      const destX = spawn.x;
+      const destZ = spawn.z * state.zSign; // 自陣側に mirror
+      const dx = destX - ob.x;
+      const dz = destZ - ob.z;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (d > 1.0) {
+        // spawn まで全力ダッシュ継続 (ハーフコート越えても止まらない)
+        setChaserVelocity(ob, destX, destZ, OBSTACLE_FULL_SPRINT_SPEED, cfg.hoverRadius, dt);
+        moveKeepFacing(ob, OBSTACLE_FULL_SPRINT_SPEED, dt);
+        ob.facing = Math.atan2(dz, dx);
+        ob.torsoFacing = ob.facing;
+        ob.neckFacing = Math.atan2(onBallMover.z - ob.z, onBallMover.x - ob.x);
+        continue;
+      }
+      // spawn 到達 → フラグクリア、通常 mark ロジックへ
+      state.obRetreatingToSpawn[oi] = false;
     }
 
     // リアクション中 → インターセプト移動（従来通り）
@@ -196,13 +240,13 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
     if (markEntityIdx === state.onBallEntityIdx) {
       state.obMems[oi].searching = false;
 
-      // エンゲージライン外: ボール保持者と自陣リムの中間で待機 (マークに追随)
-      // Phase H.8: 旧実装は INIT_OBSTACLES 固定位置 → マークを放置していたため修正
+      // Phase H.10d: マークがまだ defender の自陣に入っていない時の待機
+      //   wait 位置 = defender の spawn 位置 (ベースライン側ではなく散開済みエリア)
+      //   旧実装 (mark*0.2 + own_basket*0.8) は自陣偏重で defender が奥に引っ込みすぎていた
       if (state.zSign === 1 ? markTarget.z < DEFENSE_ENGAGE_Z : markTarget.z > -DEFENSE_ENGAGE_Z) {
-        const ownGoalX = 0;
-        const ownGoalZ = state.defendGoalZ;
-        const waitX = (markTarget.x + ownGoalX) / 2;
-        const waitZ = (markTarget.z + ownGoalZ) / 2;
+        const spawn = INIT_OBSTACLES[oi];
+        const waitX = spawn.x;
+        const waitZ = spawn.z * state.zSign;
         // ボール保持者が自分よりゴールに近い → スプリントで戻る
         const obGD = dist2d(ob.x, ob.z, state.attackGoalX, state.attackGoalZ);
         const tgtGD = dist2d(markTarget.x, markTarget.z, state.attackGoalX, state.attackGoalZ);
@@ -277,23 +321,16 @@ export function updateObstacleMovements(state: SimState, dt: number, passerMover
     const isHelping = helpEntityIdx !== undefined;
     const effectiveTarget = isHelping ? allOffense[helpEntityIdx] : markTarget;
 
-    // --- マーク対象がディフェンス自陣の奥深く: マークとリムの中間で待機 ---
-    // Phase H.8: 旧実装は INIT_OBSTACLES (固定座標) で待機 → マーク対象から
-    //   大きく離れた場所で "うろうろ" して見える原因だった。
-    //   修正: 待機位置を「マークと自陣リムの中間」に動的計算することで、
-    //   マーク対象が動けば待機位置も追随する。
+    // --- マーク対象が defender 自陣未到達: spawn 位置で待機 ---
+    // Phase H.10d: wait 先 = defender 個別の spawn (散開状態を維持)
     if (state.zSign === 1 ? effectiveTarget.z < DEFENSE_ENGAGE_Z : effectiveTarget.z > -DEFENSE_ENGAGE_Z) {
-      // 自陣リム位置 (defendGoalZ は state にあり)
-      const ownGoalX = 0;
-      const ownGoalZ = state.defendGoalZ;
-      // マークと自陣リムの中間に待機 (マーク追随しつつ自陣寄りに陣取る)
-      const waitX = (effectiveTarget.x + ownGoalX) / 2;
-      const waitZ = (effectiveTarget.z + ownGoalZ) / 2;
+      const spawn = INIT_OBSTACLES[oi];
+      const waitX = spawn.x;
+      const waitZ = spawn.z * state.zSign;
       // マーク対象が自分よりゴールに近い → スプリントで戻る
       const obGoalDist = dist2d(ob.x, ob.z, state.attackGoalX, state.attackGoalZ);
       const tgtGoalDist = dist2d(effectiveTarget.x, effectiveTarget.z, state.attackGoalX, state.attackGoalZ);
       const beaten = obGoalDist > tgtGoalDist + BEATEN_GOAL_DIST_MARGIN;
-      // 実マークから 4m 以上離れていればスプリントで詰める
       const farFromMark = dist2d(ob.x, ob.z, effectiveTarget.x, effectiveTarget.z) > 4.0;
       const waitSpeed = (beaten || farFromMark) ? cfg.interceptSpeed : cfg.idleSpeed;
       setChaserVelocity(ob, waitX, waitZ, waitSpeed, cfg.hoverRadius, dt);

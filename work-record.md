@@ -111,6 +111,194 @@
 
 `tsc --noEmit` パス。
 
+## 2026-05-18
+
+### Phase I 計画策定 — 個人スキル × 個人ディフェンス深化
+
+ユーザー依頼「スピンムーブ等の個人スキルをネットでリサーチし実装計画、対するディフェンスも合わせて」を受けて実施。
+
+リサーチ実施 (WebSearch 6 クエリ):
+- spin move 技術 + defense counter
+- crossover 技術 + defensive stance
+- stepback + defensive contest
+- eurostep + strip counter
+- closeout (sprint-stop / hand position)
+- swipe / steal / pick pocket
+- post moves + drop step counter
+- jab step / rip through / triple threat
+- PnR coverage (over/under/switch/hedge/blitz/drop)
+- block timing / verticality / charge
+
+成果: `workPlan.md` に **Phase I: 個人スキル × 個人ディフェンス深化 (実行レイヤー)** を追加。
+
+設計骨子:
+- Skill = (trigger, execution, outcome) 三位一体。現状 trigger のみ → execution + outcome を新規実装
+- Offense と Defense を対称設計、同フレーム両者発火は SkillVersusSolver で確率判定
+- Phase I.1〜I.6 で 7 週、既存 19 スキルは活用
+
+未実装 (今回は計画のみ):
+- I.1 共通基盤 (SkillExecutor / Solver)
+- I.2 オフェンス 10 スキル execution
+- I.3 ディフェンス 10 スキル新規 (Closeout / Slide / Swipe / Block / Charge / Strip / BoxOut / Hedge / Drop / Switch)
+- I.4 衝突マトリクス + 確率
+- I.5 アニメフック
+- I.6 個性化 (PlayerAbility 連結)
+
+リサーチソース 17 本を workPlan.md 末尾に併記。
+
+## 2026-05-17 (続き 10)
+
+### Phase H.26 — 3秒バイオレーション AI 判断統合 + emergency exit
+
+ユーザー再指摘: Phase H.24/H.25 でも 3秒違反が頻発。
+「AI判断 (ActionScorer) に paint 認識を入れろと依頼したはず」
+
+H.24 までは「dest 選定回避」レベル、AI 判断 (shoot/pass/hold 評価) は paint 状況を全く見ていなかった。
+movement-level も rim クラッシュ override や push 由来の paint 進入をカバーしていなかった。
+
+**Step 1: ActionScorerContext に teammatePaintTimes 追加**
+- `Types/ActionScorerTypes.ts`: `teammatePaintTimes?: number[]` フィールド追加 (0-4 オフェンス相対)
+- `Decision/ActionScorer.ts buildOnBallContext`: `state.violationState.paintTimePerOffense.slice()` を渡す
+
+**Step 2: 3 つの新規 ScoreFactor (Phase H.26)**
+- `shootPaintRescue` (weight 8.0): 味方の最大 paintTime >= 1.5s で 0.4 → 2.2s で 1.0 に増加。強制シュート方向
+- `passPaintRescue` (weight 7.0): bestPassTargetIdx 受け手の paintTime >= 1.0s なら 0.5-1.0 (catch でその選手の paintTime はリセット)
+- `holdPaintAvoid` (weight 10.0): 味方 paintTime >= 1.5s で **負値ペナルティ**。CRITICAL (2.2s+) で -1.0×10 = hold 完全却下
+- 全て DEFAULT_FACTORS に登録
+
+**Step 3: movement-level emergency exit (off-ball 全員)**
+- `Update/SimEntityUpdate.ts` の updateTargetRoleMovements 最優先 (priority -1) に追加
+- 該当 off-ball player の paintTime > 1.5s で全 override より優先で `motionSprintTo(home, OFFENSE_FULL_SPRINT_SPEED)`
+- 4.5 m/s × 残り 1.5s = 6.75m 移動可能 → paint 深 5.79m を確実に脱出
+- launcher 経路 (TrackingSimulation3D.ts) にも同等の emergency exit を追加 (pass 後 off-ball launcher 対策)
+
+設計理由:
+- AI 判断レベル (Step 1-2): on-ball が paint 危機を「認識」して shoot/pass を強く優先、hold を負ペナルティで却下
+- movement レベル (Step 3): off-ball player が物理的に paint から脱出。AI 判断が pass を選んで失敗してもこれが効くので 3秒違反は実質ゼロになる見込み
+
+`tsc --noEmit` 通過。実機での 3秒違反消失を確認。
+
+## 2026-05-17 (続き 9)
+
+### Phase H.25 — on-ball 速度引き上げ + screener hold paint 中断
+
+ユーザー報告: 「3秒立つまでドリブルしてパスも何もせず相手ボールになる」「on-ball が走りもせずただのんびり歩くだけ」
+
+原因切り分け:
+- `LAUNCHER_SPEED = 60 * S = 0.9 m/s` × `ON_BALL_SPEED_MULT 0.75` = **0.675 m/s** (歩行 1.4 m/s 以下)
+- defender sprint 4.5 m/s と 6.7 倍差 → on-ball は判断する前に追いつかれる
+- ActionScorer の hold/pass スコアが拮抗、移動が遅いため状況が変わらず hold が選ばれ続ける
+- moveScreener の hold state は early return で position を動かさず、rim クラッシュ後の paint 内 hold が 3秒違反トリガー
+
+修正 (ユーザー承認の "推奨" スケール):
+
+**速度 1-3**
+- `ON_BALL_SPEED_MULT` 0.75 → **1.0** (DefenseConfig.ts)
+- `ON_BALL_DRIBBLE_SPEED = 2.7 m/s` 新規定義 (EntityConfig.ts) — jog 相当
+- `moveOnBallSmart` / `moveOnBallDrive` で `mover.speed` ではなく `ON_BALL_DRIBBLE_SPEED` を使用
+- backcourt urgency (backcourtTimer > 5s) の dribble 速度 `TARGET_RANDOM_SPEED * 1.4 (1.68 m/s)` → `OFFENSE_FULL_SPRINT_SPEED (4.5 m/s)` 2 箇所 (launcher / target on-ball)
+
+**hold paint 中断 4**
+- `moveScreener` hold state (RoleMovement.ts) で:
+  - 現在位置が paint 内 OR paintTime > 0.5s なら hold 破棄
+  - `state.holdTimer = 0`, `state.dest = findOpenSpaceInZone(...)` で paint 外 dest 再評価
+  - `screenSet = true` 維持で次フレーム以降も phase 2 (open space モード) 継続
+  - phase 1 に戻すと launcher 位置依存で再び paint dest になりうるため避ける
+
+実速度比較 (PG ドリブル):
+- 旧: 0.9 * 0.75 = 0.675 m/s
+- 新: 2.7 * 1.0 = **2.7 m/s** (4 倍)
+
+実速度比較 (target ドリブル):
+- 旧: 1.2 * 0.75 = 0.9 m/s
+- 新: 2.7 * 1.0 = **2.7 m/s** (3 倍)
+
+実速度比較 (backcourt sprint):
+- 旧: 1.68 m/s
+- 新: **4.5 m/s** (2.7 倍)
+
+未対応 (#5 force-pass, #6 holdFatigue) はユーザー判断で「実機確認後に追加検討」となった。
+
+`tsc --noEmit` 通過。
+
+## 2026-05-17 (続き 8)
+
+### Phase H.24 — 3秒バイオレーション proactive 回避
+
+ユーザー指摘: 3秒違反が頻発、AI の判断に違反認識を組み込むべき。
+
+調査:
+- 既存 Phase H.12/H.15 の paint 回避は「リアクティブ」(paintTime 蓄積後に反応)
+- on-ball プレイヤーは 3秒対象外 (ViolationDetector.ts:67-70)
+- ゾーン設計上 ZONE_C_POST/ZONE_PF_LOW は paint 境界の外側 (z<=8.4 or x>=2.7) で clampToZone が paint 進入を防ぐ
+- ただし以下の経路で dest または position が paint に入りうる:
+  - rim クラッシュ override (SimEntityUpdate.ts:113) — ballActive 中 C/PF を低ポスト (paint 内) へ送る
+  - SchemeRunner (PnR/Spain 等) の dest が paint 寄り
+  - SCREENER phase 1 の screenZ = launcher.z + offset が paint Z 範囲
+  - DUNKER seal の sealZ が paint Z 範囲
+
+修正 (A/B/C 三段):
+
+**A. findOpenSpaceInZone のペイント常時回避 (proactive)**
+- `OpenSpaceFinder.ts:16-23` — 定数を base + escalate の 2 段構成に変更
+- `PAINT_AVOIDANCE_BASE_PENALTY = 20.0` (paintTime=0 でも常時減点)
+- `PAINT_AVOIDANCE_ESCALATE_THRESHOLD = 0.5` (蓄積 0.5s で escalate 開始)
+- `PAINT_AVOIDANCE_ESCALATE_PENALTY = 30.0` (escalate 後 1秒あたり追加減点)
+- 評価ループ内で常時 isInPaint チェック → 該当時 base 減点、threshold 越えでさらに escalate
+
+**B. 滞在検知の閾値引き下げ (反応時間短縮)**
+- `moveSecondHandler`: paintUrgent 閾値 1.0 → 0.5 (より早く再評価)
+- `moveSlasher`: shouldExitPaint 閾値 1.5 → 1.0 (cut phase 中断早期化)
+- `moveDunker`: shouldExitPaint 閾値 1.5 → 1.0 (seal 中断早期化)
+
+**C. 現在の dest が paint 内なら即時再評価 (引きずり対策)**
+- `isDestInOffenseGoalPaint(dest)` ヘルパー新規追加 (RoleMovement.ts)
+- 全 off-ball role 関数の再評価条件に `destInPaint` を追加:
+  - moveSecondHandler:222
+  - moveSlasher:266
+  - moveScreener phase 2:333 (+ paint 蓄積 1.0s 超過チェックも追加)
+  - moveDunker:380
+- scheme override / rim クラッシュ後に role に戻った瞬間に paint dest を引きずらない
+
+意図的に変更しなかった箇所:
+- rim クラッシュ override (SimEntityUpdate.ts:113) — OREB 準備に必要、shot flight ~1s 限定なので 3秒には届かない設計
+- DUNKER seal の sealX/Z 計算 — clampToZone (ZONE_PF_LOW x>=2.7) が paint width を強制で外す
+- SCREENER phase 1 の screen position — clampToZone (ZONE_C_POST z<=8.4) が paint Z を強制で外す
+
+`tsc --noEmit` 通過。実機での 3秒違反頻度低下は要確認。
+それでも頻発する場合は SimEntityUpdate.ts:113 の rim クラッシュ override に paint 滞在時間制限を入れる案 (#D) を検討。
+
+## 2026-05-17 (続き 7)
+
+### Phase H.23 — on-ball 移行時ワープ問題への手当て (#1 + #2)
+
+外部レビューでの指摘 (clampToZone が on-ball プレイヤー位置を強制 snap → ワープ) を検証して該当箇所を修正。
+
+**#1: clampToZone を on-ball 経路から除去**
+- `src/GamePlay/Game/Movement/RoleMovement.ts:186` の `moveOnBallSmart` 末尾から `clampToZone(mover, role.zone)` を削除
+- ゾーン外へ出ても snap せず、re-eval ロジック (reevalTimer / dest 評価) でゾーン内へ「向かう」dest を出して motion 層が dt-bounded に戻す
+- off-ball ロール (moveSecondHandler/Slasher/Screener/Dunker) では clampToZone は引き続き使用 (line 225/271/277/325/376)
+
+**#2: catch/settle 状態を追加**
+- `Types/TrackingSimTypes.ts` に `onBallSettleTimer: number` を追加 (SimState)
+- `Movement/MotionLayer.ts` に `motionSettle(m, dt)` 追加 — vx,vz を指数減衰 (0.5^(dt/0.05)) + moveWithFacing で位置積分
+- `TrackingSimulation3D.ts` の以下サイトで保持者切替直後に `s.onBallSettleTimer = 0.3` をセット:
+  - 1262: catch hold 解放時 (キャッチ確定)
+  - 1530: オフェンスルーズボール回収
+  - 1554: ディフェンス回収後 PG に統一
+  - 1620: pass miss → 新オフェンス
+- update() 冒頭で settleTimer を `Math.max(0, t - dt)` で減衰
+- launcher / target on-ball ブランチの canEntityMove ブロックに settle gate を追加 — `if (onBallSettleTimer > 0) motionSettle()` else 既存ロジック
+
+これにより、キャッチ位置がロールゾーン外でも (a) いきなり clampToZone で snap されない、(b) 0.3s は moveOnBallSmart の dest 再評価が走らず減速のみ、で保持者切替直後のワープ要因 2 つが断たれる。
+
+`tsc --noEmit` 通過。実機での目視確認は未実施。
+
+既知の残課題:
+- ON_BALL_SPEED_MULT 後処理 (TrackingSimulation3D.ts:1349-1350, 1428-1429) / PUSH_SPEED_MULT (SimEntityUpdate.ts:189-190) / wall bounce (MovementCore.ts:153-156) / separateEntities (MovementCore.ts:271-) は motion/physics 層責務として残置 (AI 層の責務外なので OK だが境界線をドキュメント化する案あり)
+- Phase H.21 のワープ検出 warn に「直前フレームで何処が動かしたか」を出すよう拡張する #3 案は未着手
+- AI / Motion レイヤー境界の Lint 強制 #4 案は未着手
+
 ## 2026-05-17 (続き 6)
 
 ### Phase H.5 完了 — Skill / Scheme を意思決定フローに統合

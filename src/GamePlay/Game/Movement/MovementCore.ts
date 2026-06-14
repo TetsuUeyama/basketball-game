@@ -141,8 +141,11 @@ export function makeScanMemory(lx: number, lz: number, tx: number, tz: number) {
   };
 }
 
-/** Bounce off field boundaries */
-export function bounce(m: { x: number; z: number; vx: number; vz: number }): void {
+/** Bounce off field boundaries.
+ *  Phase H.9: outOfBoundsExempt=true なら境界処理をスキップ (インバウンダー用)
+ */
+export function bounce(m: { x: number; z: number; vx: number; vz: number; outOfBoundsExempt?: boolean }): void {
+  if (m.outOfBoundsExempt) return;
   const xMin = -SIM_FIELD_X_HALF + SIM_MARGIN;
   const xMax = SIM_FIELD_X_HALF - SIM_MARGIN;
   const zMin = -SIM_FIELD_Z_HALF + SIM_MARGIN;
