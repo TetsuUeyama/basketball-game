@@ -10,6 +10,7 @@ import { mulberry32 } from './Random';
 import type { SimEvent } from './SimEvents';
 import type { BaseMap, PatrolRoute } from '../Map/MapTypes';
 import type { SoundEvent } from '../Perception/Hearing';
+import type { RadioMessage } from '../AI/RadioNet';
 import type { VisionMemory } from '../Perception/Vision';
 import { makeVisionMemory } from '../Perception/Vision';
 import { angleOf } from './MathUtils';
@@ -60,18 +61,39 @@ export interface Soldier extends AgentBase {
   /** 現在視認中の侵入者ID（立ち上がり/立ち下がり検出用） */
   visibleIntruders: Set<number>;
   weapon: { nextFireAt: number };
+  /** COMBAT の現在ターゲット */
+  targetId: number | null;
+  /** SEARCH の捜索基点と打ち切り時刻 */
+  searchAnchor: { x: number; z: number } | null;
+  searchUntil: number;
+  /** SEARCH 中の徘徊目標 */
+  wanderTarget: { x: number; z: number } | null;
 }
 
 export interface Intruder extends AgentBase {
   kind: IntruderKind;
   phase: IntruderPhase;
   moveMode: MoveMode;
+  /** 配置時の基本移動モード（隠密AIが状況で sneak/run に上書きする際の戻り先） */
+  baseMoveMode: MoveMode;
   carryingIntel: boolean;
   /** 侵入経路（Phase 4 で A* 動的経路に置換予定。現状はスクリプト固定） */
   path: { x: number; z: number }[];
   pathIdx: number;
   /** 侵入者自身の視界による警備側の学習（全知にしない） */
   knownThreats: VisionMemory;
+  /** コーン待ち開始時刻（null = 待機していない） */
+  holdSince: number | null;
+  /** この時刻まで強行突破（走り抜け）中 */
+  dashUntil: number;
+  /** 現在のダッシュが兵士コーン覚悟の突破か（false=カメラ用 → 兵士が塞いだら中止） */
+  dashVsSoldier: boolean;
+  /** コーン内後退中の目標ウェイポイント（null=後退していない。pathIdx=前進位置は保持したまま） */
+  retreatIdx: number | null;
+  /** 最後に脅威（被弾・銃声・交戦兵視認）を感じた時刻。逃走からの任務再開判定に使う */
+  lastThreatAt: number;
+  /** 被弾検出用（前tickのhp） */
+  lastKnownHp: number;
 }
 
 export interface SecurityCamera {
@@ -96,6 +118,8 @@ export interface SimState {
   intruders: Intruder[];
   cameras: SecurityCamera[];
   sounds: SoundEvent[];
+  /** 配送待ちの無線メッセージ（deliverAt 順に処理） */
+  radio: RadioMessage[];
   events: SimEvent[];
   outcome: { winner: 'intruder' | 'defender'; reason: string; time: number } | null;
   timeLimitSec: number;
@@ -166,6 +190,10 @@ export function createSimState(setup: SimSetup): SimState {
       visionMemory: makeVisionMemory(),
       visibleIntruders: new Set(),
       weapon: { nextFireAt: 0 },
+      targetId: null,
+      searchAnchor: null,
+      searchUntil: 0,
+      wanderTarget: null,
     };
   });
 
@@ -186,10 +214,17 @@ export function createSimState(setup: SimSetup): SimState {
       footstepTimer: 0,
       phase: 'infiltrate',
       moveMode: s.moveMode,
+      baseMoveMode: s.moveMode,
       carryingIntel: false,
       path: s.path,
       pathIdx: 0,
       knownThreats: makeVisionMemory(),
+      holdSince: null,
+      dashUntil: 0,
+      dashVsSoldier: false,
+      retreatIdx: null,
+      lastThreatAt: 0,
+      lastKnownHp: INTRUDER.hp,
     };
   });
 
@@ -215,6 +250,7 @@ export function createSimState(setup: SimSetup): SimState {
     intruders,
     cameras,
     sounds: [],
+    radio: [],
     events: [],
     outcome: null,
     timeLimitSec: setup.timeLimitSec,

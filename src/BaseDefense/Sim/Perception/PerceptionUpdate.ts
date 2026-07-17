@@ -27,6 +27,7 @@ import {
 } from '../Config/PerceptionConfig';
 import { ALERT } from '../Config/AlertConfig';
 import { clamp } from '../Core/MathUtils';
+import { broadcast } from '../AI/RadioNet';
 
 export function updatePerception(state: SimState, dt: number): void {
   const occl = (ax: number, az: number, bx: number, bz: number) =>
@@ -167,6 +168,8 @@ function updateCameraVision(
           x: i.x,
           z: i.z,
         });
+        // カメラ検知は無線で兵士へ共有（管制室経由の想定で遅延あり）
+        broadcast(state, c.id, i.x, i.z);
       }
     } else if (wasVisible) {
       c.visibleIntruders.delete(i.id);

@@ -91,7 +91,10 @@ export function ScenePanel() {
           state: s.fsm.state,
           suspicion: s.suspicion,
         })),
-        recentEvents: state.events.slice(-6).map(formatEvent),
+        recentEvents: state.events
+          .filter((ev) => ev.kind !== 'fsm_change' && ev.kind !== 'sighting_lost')
+          .slice(-6)
+          .map(formatEvent),
       });
     }, 250);
 
@@ -122,10 +125,16 @@ function formatEvent(ev: SimEvent): string {
       return `${t} 兵士${ev.actorId} が物音を聴取 (${ev.detail})`;
     case 'camera_detect':
       return `${t} カメラ${ev.actorId} が侵入者を検知`;
+    case 'radio':
+      return `${t} 兵士${ev.actorId} が無線で目撃情報を受信`;
+    case 'shot':
+      return `${t} 兵士${ev.actorId} が発砲 (${ev.detail === 'hit' ? '命中' : '外れ'})`;
+    case 'kill':
+      return `${t} 兵士${ev.actorId} が侵入者を排除！`;
     case 'objective_taken':
       return `${t} 侵入者が機密を奪取！`;
     case 'exfil':
-      return `${t} 侵入者が離脱`;
+      return `${t} 侵入者が離脱${ev.detail === 'with_intel' ? '（機密持ち出し）' : '（手ぶら）'}`;
     case 'match_end':
       return `${t} 試合終了 (${ev.detail})`;
     default:

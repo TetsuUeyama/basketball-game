@@ -9,7 +9,7 @@
 import type { BaseMap, WallSeg } from '../Map/MapTypes';
 
 const WALL_H = 3.0;   // 建物壁の高さ (m)
-const FENCE_H = 2.0;  // フェンスの高さ
+const FENCE_H = 2.2;  // 外周塀の高さ
 const CRATE_H = 1.4;  // クレートの高さ
 
 /** 建物壁（視線・移動とも遮る） */
@@ -17,9 +17,9 @@ function wall(x1: number, z1: number, x2: number, z2: number, doorId?: number): 
   return { x1, z1, x2, z2, blocksVision: true, blocksMove: true, doorId, height: WALL_H };
 }
 
-/** フェンス（金網 — 視線は通る・移動は遮る） */
+/** 外周塀（視線・移動とも遮る。塀の外は安全な接近路 — 侵入リスクは門に集中させる設計） */
 function fence(x1: number, z1: number, x2: number, z2: number): WallSeg {
-  return { x1, z1, x2, z2, blocksVision: false, blocksMove: true, height: FENCE_H };
+  return { x1, z1, x2, z2, blocksVision: true, blocksMove: true, height: FENCE_H };
 }
 
 /** クレート（低い遮蔽 — 視線・移動とも遮る） */
@@ -29,10 +29,11 @@ function crate(x1: number, z1: number, x2: number, z2: number): WallSeg {
 
 export function createBaseMap(): BaseMap {
   const walls: WallSeg[] = [
-    // ---- 外周フェンス（南門: x∈[-2,2] が開口） ----
+    // ---- 外周塀（南門: x∈[-2,2] / 北西裏口: x∈[-26,-22] が開口） ----
     fence(-28, -18, -2, -18),
     fence(2, -18, 28, -18),
-    fence(-28, 18, 28, 18),
+    fence(-28, 18, -26, 18),
+    fence(-22, 18, 28, 18),
     fence(-28, -18, -28, 18),
     fence(28, -18, 28, 18),
 
@@ -69,8 +70,8 @@ export function createBaseMap(): BaseMap {
     ],
     // 機密（侵入目標）は建物Aの中
     objective: { x: -14, z: 9 },
-    // 南門の外が離脱ゾーン
-    exfilZones: [{ x: 0, z: -19.2, r: 1.6 }],
-    intruderSpawns: [{ x: 0, z: -19.2 }],
+    // 南西の角（フェンス外・門番の視界外）がスポーン兼離脱ゾーン
+    exfilZones: [{ x: -26, z: -19.2, r: 1.6 }],
+    intruderSpawns: [{ x: -26, z: -19.2 }],
   };
 }

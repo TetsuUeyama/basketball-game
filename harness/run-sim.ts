@@ -12,7 +12,14 @@ import { createSimState } from '../src/BaseDefense/Sim/Core/SimState';
 import type { SimState } from '../src/BaseDefense/Sim/Core/SimState';
 import { updateSim } from '../src/BaseDefense/Sim/Core/SimLoop';
 import { createDefaultSetup } from '../src/BaseDefense/Sim/Config/MatchConfig';
-import { scenarioCrossCone, scenarioBehindWall, scenarioHearing } from './scenarios';
+import { dist2d } from '../src/BaseDefense/Sim/Core/MathUtils';
+import {
+  scenarioCrossCone,
+  scenarioBehindWall,
+  scenarioHearing,
+  scenarioCombat,
+  scenarioRadioConverge,
+} from './scenarios';
 
 const DT = 1 / 60;
 let failures = 0;
@@ -113,39 +120,133 @@ console.log('■ シナリオ4: 決定論 — 同一シード2回実行で全エ
 }
 
 // =========================================================================
-console.log('■ 参考統計: デフォルト試合 20 シード（現状はFSM未実装 = 兵士は反応しない）');
+console.log('■ シナリオ5: 交戦 — 正面から来る侵入者を発見→射撃。全試合が決着する');
+{
+  let shots = 0;
+  let kills = 0;
+  let escapes = 0;
+  let timeouts = 0;
+  for (const seed of SEEDS) {
+    const state = createSimState(scenarioCombat(seed));
+    runFor(state, 90);
+    shots += state.events.filter((e) => e.kind === 'shot').length;
+    kills += state.events.filter((e) => e.kind === 'kill').length;
+    escapes += state.events.filter((e) => e.kind === 'exfil').length;
+    if (!state.outcome || state.outcome.reason === 'timeout') timeouts++;
+  }
+  check('発砲が発生', shots > 0, `${shots} 発`);
+  check('全試合が決着（排除 or 逃走完了）',
+    kills + escapes === SEEDS.length && timeouts === 0,
+    `排除${kills} / 逃走${escapes} / タイムアウト${timeouts}`);
+}
+
+// =========================================================================
+console.log('■ シナリオ6: 無線収束 — カメラ検知の無線を受けた兵士BがSEARCHで現地へ');
+{
+  let radioOk = 0;
+  let convergeOk = 0;
+  let searchOk = 0;
+  for (const seed of SEEDS) {
+    const state = createSimState(scenarioRadioConverge(seed));
+    const soldierB = state.soldiers[0];
+    // 目撃位置（無線で報告された座標）と兵士Bの最接近距離を追跡
+    let reported: { x: number; z: number } | null = null;
+    let minDist = Infinity;
+    const DT2 = 1 / 60;
+    for (let k = 0; k < 60 * 60; k++) {
+      updateSim(state, DT2);
+      if (!reported) {
+        const radioEv = state.events.find(
+          (e) => e.kind === 'radio' && e.actorId === soldierB.id,
+        );
+        if (radioEv) reported = { x: radioEv.x, z: radioEv.z };
+      } else {
+        minDist = Math.min(minDist, dist2d(soldierB.x, soldierB.z, reported.x, reported.z));
+      }
+      if (state.outcome) break;
+    }
+    if (reported) radioOk++;
+    if (minDist <= 6) convergeOk++;
+    if (state.events.some(
+      (e) => e.kind === 'fsm_change' && e.actorId === soldierB.id && e.detail?.endsWith('->SEARCH'),
+    )) searchOk++;
+  }
+  check('Bが無線を受信', radioOk === SEEDS.length, `${radioOk}/${SEEDS.length}`);
+  check('BがSEARCHへ遷移', searchOk === SEEDS.length, `${searchOk}/${SEEDS.length}`);
+  check('Bが目撃位置6m以内へ収束', convergeOk === SEEDS.length, `${convergeOk}/${SEEDS.length}`);
+}
+
+// =========================================================================
+console.log('■ シナリオ7: FSMフラッピングなし — デフォルト試合10シード');
+{
+  // フラップ = A→B→A の1秒未満往復のうち、2遷移目がデエスカレーション
+  //（警戒度が下がる方向）のもの。視認による即時エスカレーション（例: SEARCH→COMBAT
+  // の再交戦）は意図した挙動なので数えない。
+  const RANK: Record<string, number> = { PATROL: 0, SUSPICIOUS: 1, SEARCH: 2, COMBAT: 3 };
+  let flaps = 0;
+  for (let seed = 200; seed < 210; seed++) {
+    const state = createSimState(createDefaultSetup(seed));
+    runFor(state, state.timeLimitSec + 5);
+    const bySoldier = new Map<number, { time: number; detail: string }[]>();
+    for (const e of state.events) {
+      if (e.kind !== 'fsm_change' || e.actorId === undefined || !e.detail?.includes('->')) continue;
+      if (e.detail.startsWith('intruder')) continue;
+      if (!bySoldier.has(e.actorId)) bySoldier.set(e.actorId, []);
+      bySoldier.get(e.actorId)!.push({ time: e.time, detail: e.detail });
+    }
+    for (const changes of bySoldier.values()) {
+      for (let k = 1; k < changes.length; k++) {
+        const [prevFrom, prevTo] = changes[k - 1].detail.split('->');
+        const [curFrom, curTo] = changes[k].detail.split('->');
+        const isReturn = prevFrom === curTo && prevTo === curFrom;
+        const isDeescalation = RANK[curTo] < RANK[curFrom];
+        if (isReturn && isDeescalation && changes[k].time - changes[k - 1].time < 1.0) {
+          flaps++;
+        }
+      }
+    }
+  }
+  check('フラッピング', flaps === 0, `1秒未満のデエスカレーション往復 ${flaps} 件（期待0）`);
+}
+
+// =========================================================================
+console.log('■ 参考統計: デフォルト試合 20 シード（FSM+交戦+隠密AI有効）');
 {
   const outcomes: Record<string, number> = {};
   let totalSightings = 0;
   let totalHeard = 0;
   let totalCamera = 0;
-  let firstDetectTimes: number[] = [];
-  for (let seed = 100; seed < 120; seed++) {
+  let totalShots = 0;
+  let totalKills = 0;
+  let defenderWins = 0;
+  let timeouts = 0;
+  const N = 20;
+  for (let seed = 100; seed < 100 + N; seed++) {
     const state = createSimState(createDefaultSetup(seed));
     runFor(state, state.timeLimitSec + 5);
     const key = state.outcome ? `${state.outcome.winner}:${state.outcome.reason}` : 'none';
     outcomes[key] = (outcomes[key] ?? 0) + 1;
+    if (state.outcome?.winner === 'defender') defenderWins++;
+    if (!state.outcome || state.outcome.reason === 'timeout') timeouts++;
     totalSightings += state.events.filter((e) => e.kind === 'sighting').length;
     totalHeard += state.events.filter((e) => e.kind === 'sound_heard').length;
     totalCamera += state.events.filter((e) => e.kind === 'camera_detect').length;
-    const first = state.events.find(
-      (e) => e.kind === 'sighting' || e.kind === 'sound_heard' || e.kind === 'camera_detect',
-    );
-    if (first) firstDetectTimes.push(first.time);
+    totalShots += state.events.filter((e) => e.kind === 'shot').length;
+    totalKills += state.events.filter((e) => e.kind === 'kill').length;
   }
   console.log(`  勝敗分布: ${JSON.stringify(outcomes)}`);
   console.log(
-    `  検知イベント/試合: 視認${(totalSightings / 20).toFixed(1)} ` +
-    `聴取${(totalHeard / 20).toFixed(1)} カメラ${(totalCamera / 20).toFixed(1)}`,
+    `  イベント/試合: 視認${(totalSightings / N).toFixed(1)} ` +
+    `聴取${(totalHeard / N).toFixed(1)} カメラ${(totalCamera / N).toFixed(1)} ` +
+    `発砲${(totalShots / N).toFixed(1)} 排除${(totalKills / N).toFixed(1)}`,
   );
-  if (firstDetectTimes.length > 0) {
-    const avg = firstDetectTimes.reduce((a, b) => a + b, 0) / firstDetectTimes.length;
-    console.log(
-      `  初検知: ${firstDetectTimes.length}/20 試合で発生, 平均 ${avg.toFixed(1)}秒`,
-    );
-  } else {
-    console.log('  初検知: 0/20 試合 — 要確認（侵入者が完全に検知網を回避している）');
-  }
+  console.log(`  防衛側勝率: ${((defenderWins / N) * 100).toFixed(0)}%`);
+  check('タイムアウトなし（全試合が能動的に決着）', timeouts === 0, `${timeouts}/${N} 件`);
+  check(
+    '防衛側勝率が退化していない (5〜95%)',
+    defenderWins / N >= 0.05 && defenderWins / N <= 0.95,
+    `${defenderWins}/${N}`,
+  );
 }
 
 // =========================================================================

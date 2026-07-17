@@ -14,8 +14,8 @@ export const ALERT = {
   decayPerSec: 0.08,
   /** 周辺視野で視認した時の suspicion 上昇 (毎秒) */
   risePeripheralPerSec: 0.5,
-  /** 中心視野で視認した時の suspicion 上昇 (毎秒) — ほぼ即確信 */
-  riseCentralPerSec: 2.5,
+  /** 中心視野で視認した時の suspicion 上昇 (毎秒) — 約0.6秒で確信 */
+  riseCentralPerSec: 1.6,
   /** 聴覚検知1回あたりの suspicion 加算 */
   riseOnSound: 0.4,
   /** 状態の最低滞在秒（フラッピング防止） */
