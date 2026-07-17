@@ -53,6 +53,15 @@ export interface MoveResult {
 }
 
 /**
+ * 実効到達半径。最小旋回半径 (speed/turnRate) 未満の目標には旋回が追いつかず
+ * 周回してしまうため、到達判定はこれ以上に取る。
+ * moveTowards の内部判定と、外部の距離比較（経路遡り等）で必ず同じ値を使うこと。
+ */
+export function effectiveArrive(speed: number, turnRate: number, base: number): number {
+  return Math.max(base, (speed / turnRate) * 1.1);
+}
+
+/**
  * 目標地点へ向かって旋回しつつ前進する（向き＝進行方向を保証する移動）。
  *  - facing を目標方向へ turnRate で回頭
  *  - 前進は常に facing 方向（=カプセルの鼻の向きと移動方向が一致する）
@@ -73,7 +82,10 @@ export function moveTowards(
   const dx = targetX - agent.x;
   const dz = targetZ - agent.z;
   const dist = Math.sqrt(dx * dx + dz * dz);
-  if (dist <= arriveDist) return { moved: 0, arrived: true };
+  // 軌道トラップ防止（走行4.5m/s・旋回300°/sで実際に発生した）
+  if (dist <= effectiveArrive(speed, turnRate, arriveDist)) {
+    return { moved: 0, arrived: true };
+  }
 
   const targetAngle = angleOf(dx, dz);
   agent.facing = turnToward(agent.facing, targetAngle, turnRate * dt);

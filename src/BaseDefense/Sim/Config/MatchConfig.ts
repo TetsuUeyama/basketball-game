@@ -27,14 +27,15 @@ export function createDefaultSetup(seed: number = 20260717): SimSetup {
     timeLimitSec: DEFAULT_TIME_LIMIT_SEC,
 
     soldiers: [
-      // S1: 建物A（機密庫）の東側を往復巡回。
-      // 西通路・裏口は意図的に巡回対象外（ドアの固定カメラ＋物音対応で守る）—
-      // 守りの薄い侵入路を1本残すのがレベルデザインの意図
+      // S1: 建物A（機密庫）の東側を往復し、周回ごとにドア前の見回りに立ち寄る。
+      // 西通路・裏口は巡回対象外（守りの薄い侵入路を残すレベルデザイン）だが、
+      // ドア前チェックがあるためカメラを無効化しても「人の目」は定期的に入る
       {
         x: -4, z: 0,
         route: {
           mode: 'pingpong',
           points: [
+            { x: -12, z: 0.5, waitSec: 2.0, lookAngle: NORTH }, // 金庫ドア前チェック
             { x: -4, z: 0, waitSec: 1.5, lookAngle: SOUTH },
             { x: -4, z: 16, waitSec: 2.0, lookAngle: WEST },
           ],

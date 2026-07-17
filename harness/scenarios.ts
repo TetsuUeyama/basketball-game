@@ -129,7 +129,8 @@ export function scenarioRadioConverge(seed: number): SimSetup {
     ],
     intruders: [
       {
-        kind: 'spy',
+        // squad はカメラを無効化できない → 必ず強行突破してカメラ検知が発生する
+        kind: 'squad',
         x: -18,
         z: 8,
         moveMode: 'walk',
@@ -141,6 +142,20 @@ export function scenarioRadioConverge(seed: number): SimSetup {
         ],
       },
     ],
+  };
+}
+
+/**
+ * シナリオ8用: カメラのサボタージュ。
+ * 配置はシナリオ6と同じだが、侵入者は spy（無効化可能）。
+ * 期待: カメラ背後に回り込んで無効化 → カメラ検知0で通過。
+ *       15秒後に管制が映像喪失に気づき無線 → 兵士Bがカメラ位置へ調査に向かう。
+ */
+export function scenarioSabotage(seed: number): SimSetup {
+  const setup = scenarioRadioConverge(seed);
+  return {
+    ...setup,
+    intruders: setup.intruders.map((i) => ({ ...i, kind: 'spy' as const })),
   };
 }
 

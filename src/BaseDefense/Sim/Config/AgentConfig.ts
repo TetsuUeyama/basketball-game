@@ -88,7 +88,25 @@ export const INTRUDER = {
     /** HPがこの割合以下なら任務続行を諦めて本当に撤退する */
     woundedRetreatHpRatio: 0.35,
   },
+  /** カメラ無効化（サボタージュ）— コーン外から背後に回り込んで作業する */
+  sabotage: {
+    /** 作業可能距離 (m) */
+    range: 1.4,
+    /** 無効化に要する連続作業秒数 */
+    timeSec: 3.0,
+    /** カメラ背後の回り込み目標点のオフセット (m) */
+    behindOffset: 0.9,
+    /** 視認した兵士がこの距離内に来たら作業を中断して退避 */
+    abortSoldierDist: 12,
+  },
 } as const;
+
+/** タイプ別: カメラを無効化できるか（部隊は正面突破型なのでできない） */
+export const CAN_SABOTAGE: Record<'spy' | 'ninja' | 'squad', boolean> = {
+  spy: true,
+  ninja: true,
+  squad: false,
+};
 
 /** ウェイポイント到達判定距離 (m) */
 export const WAYPOINT_ARRIVE_DIST = 0.5;

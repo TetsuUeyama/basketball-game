@@ -12,6 +12,8 @@ export type SimEventKind =
   | 'radio'           // 無線共有の配送
   | 'fsm_change'      // 兵士FSM遷移
   | 'camera_detect'   // 監視カメラ検知
+  | 'camera_disabled' // 侵入者によるカメラ無効化
+  | 'camera_feed_lost'// 管制が映像喪失に気づき調査を指示
   | 'shot'            // 発砲
   | 'kill'            // 排除/死亡
   | 'objective_taken' // 機密奪取

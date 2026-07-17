@@ -125,6 +125,10 @@ function formatEvent(ev: SimEvent): string {
       return `${t} 兵士${ev.actorId} が物音を聴取 (${ev.detail})`;
     case 'camera_detect':
       return `${t} カメラ${ev.actorId} が侵入者を検知`;
+    case 'camera_disabled':
+      return `${t} カメラ${ev.targetId} が無効化された！`;
+    case 'camera_feed_lost':
+      return `${t} 管制: カメラ${ev.actorId} 応答なし — 調査指示`;
     case 'radio':
       return `${t} 兵士${ev.actorId} が無線で目撃情報を受信`;
     case 'shot':

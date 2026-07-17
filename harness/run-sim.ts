@@ -19,6 +19,7 @@ import {
   scenarioHearing,
   scenarioCombat,
   scenarioRadioConverge,
+  scenarioSabotage,
 } from './scenarios';
 
 const DT = 1 / 60;
@@ -174,6 +175,40 @@ console.log('■ シナリオ6: 無線収束 — カメラ検知の無線を受�
   check('Bが無線を受信', radioOk === SEEDS.length, `${radioOk}/${SEEDS.length}`);
   check('BがSEARCHへ遷移', searchOk === SEEDS.length, `${searchOk}/${SEEDS.length}`);
   check('Bが目撃位置6m以内へ収束', convergeOk === SEEDS.length, `${convergeOk}/${SEEDS.length}`);
+}
+
+// =========================================================================
+console.log('■ シナリオ8: カメラ無効化 — 背後に回り込んで無効化し検知0で通過 → 映像喪失に管制が対応');
+{
+  let disabledOk = 0;
+  let noDetect = 0;
+  let feedLossOk = 0;
+  let investigateOk = 0;
+  for (const seed of SEEDS) {
+    const state = createSimState(scenarioSabotage(seed));
+    const soldierB = state.soldiers[0];
+    const cam = state.cameras[0];
+    let minDistToCam = Infinity;
+    let feedLossSeen = false;
+    const DT2 = 1 / 60;
+    for (let k = 0; k < 60 * 60; k++) {
+      updateSim(state, DT2);
+      if (!feedLossSeen) {
+        feedLossSeen = state.events.some((e) => e.kind === 'camera_feed_lost');
+      } else {
+        minDistToCam = Math.min(minDistToCam, dist2d(soldierB.x, soldierB.z, cam.x, cam.z));
+      }
+      if (state.outcome) break;
+    }
+    if (state.events.some((e) => e.kind === 'camera_disabled')) disabledOk++;
+    if (state.events.filter((e) => e.kind === 'camera_detect').length === 0) noDetect++;
+    if (feedLossSeen) feedLossOk++;
+    if (minDistToCam <= 6) investigateOk++;
+  }
+  check('カメラ無効化の成立', disabledOk === SEEDS.length, `${disabledOk}/${SEEDS.length}`);
+  check('カメラ検知ゼロで通過', noDetect === SEEDS.length, `${noDetect}/${SEEDS.length}`);
+  check('管制が映像喪失に気づく', feedLossOk === SEEDS.length, `${feedLossOk}/${SEEDS.length}`);
+  check('兵士がカメラ位置6m以内へ調査', investigateOk === SEEDS.length, `${investigateOk}/${SEEDS.length}`);
 }
 
 // =========================================================================

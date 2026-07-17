@@ -160,6 +160,8 @@ export class AgentMeshes {
       const e = this.cameraHeads.get(c.id);
       if (!e) continue;
       setYaw(e.root, c.facing, e.yawOffset);
+      // 無効化されたカメラは黒ずんだ表示に
+      e.mat.diffuseColor = Color3.FromHexString(c.disabled ? '#374151' : '#e5e7eb');
     }
 
     // 起動後最初の同期で向き検証（3D座標ルール: 向きと移動方向の一致確認）

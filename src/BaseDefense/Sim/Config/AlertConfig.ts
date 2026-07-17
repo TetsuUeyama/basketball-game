@@ -24,6 +24,8 @@ export const ALERT = {
   searchGiveUpSec: 12,
   /** 無線共有の配送遅延（秒） */
   radioDelaySec: 2.0,
+  /** カメラ無効化から管制が映像喪失に気づくまでの秒数 */
+  cameraFeedLossNoticeSec: 10,
   /** 無線の到達範囲 (m)。0以下で全域到達 */
   radioRange: 0,
 } as const;

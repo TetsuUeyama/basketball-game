@@ -94,6 +94,10 @@ export interface Intruder extends AgentBase {
   lastThreatAt: number;
   /** 被弾検出用（前tickのhp） */
   lastKnownHp: number;
+  /** サボタージュ対象のカメラID（null=作業していない） */
+  sabotageTargetId: number | null;
+  /** 作業圏内に入った時刻（連続 timeSec で無効化完了。離れたらリセット） */
+  sabotageSince: number | null;
 }
 
 export interface SecurityCamera {
@@ -105,6 +109,10 @@ export interface SecurityCamera {
   /** 首振り設定。null なら固定 */
   sweep: { center: number; halfArc: number; speed: number; dir: 1 | -1 } | null;
   disabled: boolean;
+  /** 無効化された時刻（映像喪失の管制対応に使う） */
+  disabledAt: number | null;
+  /** 管制が映像喪失を通報済みか */
+  feedLossReported: boolean;
   visibleIntruders: Set<number>;
 }
 
@@ -225,6 +233,8 @@ export function createSimState(setup: SimSetup): SimState {
       retreatIdx: null,
       lastThreatAt: 0,
       lastKnownHp: INTRUDER.hp,
+      sabotageTargetId: null,
+      sabotageSince: null,
     };
   });
 
@@ -237,6 +247,8 @@ export function createSimState(setup: SimSetup): SimState {
       ? { center: c.facing, halfArc: c.sweep.halfArc, speed: c.sweep.speed, dir: 1 }
       : null,
     disabled: false,
+    disabledAt: null,
+    feedLossReported: false,
     visibleIntruders: new Set(),
   }));
 

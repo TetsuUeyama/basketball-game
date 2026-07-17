@@ -8,12 +8,14 @@
 
 import type { SimState } from './SimState';
 import { normAngleDiff } from './MathUtils';
+import { pushEvent } from './SimEvents';
 import { updateDefender } from '../AI/DefenderFSM';
 import { updateIntruderAI } from '../AI/IntruderAI';
-import { processRadio } from '../AI/RadioNet';
+import { processRadio, broadcast } from '../AI/RadioNet';
 import { separateAgents } from '../Movement/MovementCore';
 import { updatePerception } from '../Perception/PerceptionUpdate';
 import { checkWinLose } from '../Rules/WinLose';
+import { ALERT } from '../Config/AlertConfig';
 
 export function updateSim(state: SimState, dt: number): void {
   if (state.outcome) return;
@@ -29,9 +31,28 @@ export function updateSim(state: SimState, dt: number): void {
     updateDefender(state, s, dt);
   }
 
-  // ---- 監視カメラ: 首振り ----
+  // ---- 監視カメラ: 首振り / 映像喪失の管制対応 ----
   for (const c of state.cameras) {
-    if (c.disabled || !c.sweep) continue;
+    if (c.disabled) {
+      // 無効化から一定時間で管制が映像喪失に気づき、カメラ位置の調査を無線指示
+      if (
+        c.disabledAt !== null &&
+        !c.feedLossReported &&
+        state.time - c.disabledAt >= ALERT.cameraFeedLossNoticeSec
+      ) {
+        c.feedLossReported = true;
+        broadcast(state, c.id, c.x, c.z);
+        pushEvent(state.events, {
+          time: state.time,
+          kind: 'camera_feed_lost',
+          actorId: c.id,
+          x: c.x,
+          z: c.z,
+        });
+      }
+      continue;
+    }
+    if (!c.sweep) continue;
     c.facing += c.sweep.speed * c.sweep.dir * dt;
     const rel = normAngleDiff(c.sweep.center, c.facing);
     if (rel > c.sweep.halfArc) {

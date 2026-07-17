@@ -110,8 +110,13 @@ function updateSoldierVision(
       sawSomeone = true;
       recordSighting(s.visionMemory, i.id, i.x, i.z, tier, state.time);
       s.stimulus = { x: i.x, z: i.z, time: state.time };
+      // 確信速度は距離でスケール: 至近=即確信 / 視程ぎわ=確信まで1秒超
+      // （遠距離でコーンをかすめただけなら退避が間に合う — 近距離遭遇は致命的なまま）
+      const dist = Math.sqrt((i.x - s.x) ** 2 + (i.z - s.z) ** 2);
+      const range = tier === 'central' ? SOLDIER_VISION.centralRange : SOLDIER_VISION.peripheralRange;
+      const distFactor = clamp(1.5 - dist / range, 0.5, 1.5);
       const rise = tier === 'central' ? ALERT.riseCentralPerSec : ALERT.risePeripheralPerSec;
-      s.suspicion = clamp(s.suspicion + rise * dt, 0, 2);
+      s.suspicion = clamp(s.suspicion + rise * distFactor * dt, 0, 2);
       if (!wasVisible) {
         s.visibleIntruders.add(i.id);
         pushEvent(state.events, {
