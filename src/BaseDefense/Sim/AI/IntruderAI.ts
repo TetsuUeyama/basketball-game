@@ -19,6 +19,7 @@ import { moveTowards, turnNeckToward, effectiveArrive } from '../Movement/Moveme
 import { canSee } from '../Perception/Vision';
 import type { VisionParams } from '../Perception/Vision';
 import { isOccluded } from '../Map/Occlusion';
+import { resolveCircleCollision } from '../Map/Collision';
 import { emitFootsteps } from '../Perception/PerceptionUpdate';
 import {
   INTRUDER,
@@ -151,6 +152,9 @@ export function updateIntruderAI(state: SimState, i: Intruder, dt: number): void
     // 中断された場合はそのまま通常の隠密進行へフォールスルー
   }
 
+  // ---- チェックポイント修理（至近の未修理配電盤を規定数まで修理する） ----
+  if (i.phase === 'infiltrate' && updateRepair(state, i, dt)) return;
+
   // ---- 隠密進行 ----
   const wp = i.path[Math.min(i.pathIdx, i.path.length - 1)];
   const threats = collectThreatCones(state, i);
@@ -280,6 +284,22 @@ export function updateIntruderAI(state: SimState, i: Intruder, dt: number): void
     i.holdSince = null;
     i.dashVsSoldier = false;
     i.retreatIdx = null;
+    // 一時迂回中（スタック解消）
+    if (i.detour) {
+      if (dist2d(i.x, i.z, i.detour.x, i.detour.z) <= 0.7) {
+        i.detour = null;
+      } else {
+        i.moveMode = 'walk';
+        moved = moveTowards(
+          i, i.detour.x, i.detour.z,
+          INTRUDER.speed.walk, INTRUDER.turnRate, dt,
+          state.map, i.radius, 0.6,
+        ).moved;
+        emitFootsteps(state, i, i.moveMode, moved, dt);
+        neckFollow(i, state.time, dt);
+        return;
+      }
+    }
     const nearCone =
       threats.some((t) =>
         coneCovers(state, t, i.x, i.z, st.sneakMarginDist, st.sneakMarginAngle),
@@ -287,23 +307,50 @@ export function updateIntruderAI(state: SimState, i: Intruder, dt: number): void
       threats.some((t) =>
         coneCovers(state, t, aheadX, aheadZ, st.sneakMarginDist, st.sneakMarginAngle),
       );
+    const nearestSoldierDist = threats
+      .filter((t) => t.kind === 'soldier')
+      .reduce<number>((min, t) => Math.min(min, dist2d(t.x, t.z, i.x, i.z)), Infinity);
     if (nearCone) {
-      i.moveMode = 'sneak';
+      // 監視されうる地帯: 兵士が足音圏内なら忍び足、圏外なら走って駆け抜ける
+      // （忍び足は聴覚対策 — 視覚に対しては晒される時間を減らす方が有利）
+      i.moveMode = nearestSoldierDist <= SOUND_RADIUS.run ? 'sneak' : 'run';
     } else if (i.carryingIntel) {
       // 機密入手後は一刻も早く離脱する。ただし兵士に走行音(13m)が届く距離では歩く
-      const nearestSoldier = threats
-        .filter((t) => t.kind === 'soldier')
-        .reduce<number>((min, t) => Math.min(min, dist2d(t.x, t.z, i.x, i.z)), Infinity);
-      i.moveMode = nearestSoldier > SOUND_RADIUS.run ? 'run' : 'walk';
+      i.moveMode = nearestSoldierDist > SOUND_RADIUS.run ? 'run' : 'walk';
+    } else if (nearestSoldierDist <= SOUND_RADIUS.walk + 4) {
+      // 見えている兵士が近い間は忍び足で足音を消す（歩行音5mで調査を呼ばない）
+      i.moveMode = 'sneak';
     } else {
       i.moveMode = i.baseMoveMode;
     }
-    moved = moveTowards(
+    const res = moveTowards(
       i, wp.x, wp.z,
       INTRUDER.speed[i.moveMode], INTRUDER.turnRate, dt,
       state.map, i.radius, WAYPOINT_ARRIVE_DIST,
-    ).moved;
+    );
+    moved = res.moved;
     neckFollow(i, state.time, dt);
+
+    // スタック検知: 進む意図があるのに障害物で進めない → 左右へ迂回
+    // （後退・復帰でスクリプト経路の想定と逆側に出た場合の永久詰み対策）
+    if (!res.arrived && moved < 0.01) {
+      if (i.stuckSince === null) i.stuckSince = state.time;
+      if (state.time - i.stuckSince > 1.5) {
+        const base = angleOf(wp.x - i.x, wp.z - i.z);
+        for (const off of [Math.PI / 2, -Math.PI / 2, (3 * Math.PI) / 4, -(3 * Math.PI) / 4]) {
+          const px = i.x + dirX(base + off) * 2.5;
+          const pz = i.z + dirZ(base + off) * 2.5;
+          const resolved = resolveCircleCollision(state.map, px, pz, i.radius);
+          if (dist2d(resolved.x, resolved.z, i.x, i.z) > 1.8) {
+            i.detour = { x: resolved.x, z: resolved.z };
+            break;
+          }
+        }
+        i.stuckSince = null;
+      }
+    } else {
+      i.stuckSince = null;
+    }
   }
 
   emitFootsteps(state, i, i.moveMode, moved, dt);
@@ -312,7 +359,8 @@ export function updateIntruderAI(state: SimState, i: Intruder, dt: number): void
   if (
     dist2d(i.x, i.z, wp.x, wp.z) <=
       effectiveArrive(INTRUDER.speed[i.moveMode], INTRUDER.turnRate, WAYPOINT_ARRIVE_DIST) &&
-    i.pathIdx < i.path.length - 1
+    i.pathIdx < i.path.length - 1 &&
+    !waypointHeldByCheckpoint(state, i, wp)
   ) {
     i.pathIdx++;
   }
@@ -428,6 +476,115 @@ function neckFollow(i: Intruder, time: number, dt: number): void {
     i.facing, i.neckFacing, i.facing + sweep,
     SOLDIER.neckTurnRate * dt, SOLDIER.neckMaxAngle,
   );
+}
+
+// =========================================================================
+// チェックポイント修理
+// =========================================================================
+
+function remainingRepairs(state: SimState): number {
+  if (!state.map.gate) return 0;
+  const repaired = state.checkpoints.filter((cp) => cp.repaired).length;
+  return Math.max(0, state.map.gate.requiredRepairs - repaired);
+}
+
+/** ウェイポイントが未修理チェックポイントの側なら、修理完了まで先へ進まない */
+function waypointHeldByCheckpoint(
+  state: SimState,
+  i: Intruder,
+  wp: { x: number; z: number },
+): boolean {
+  if (i.phase !== 'infiltrate') return false;
+  if (remainingRepairs(state) <= 0) return false;
+  return state.checkpoints.some(
+    (cp) =>
+      !cp.repaired &&
+      dist2d(wp.x, wp.z, cp.x, cp.z) <= INTRUDER.repair.holdWaypointDist,
+  );
+}
+
+/**
+ * 至近の未修理チェックポイントの修理。true = このtickを処理した。
+ * 兵士の接近・コーン捕捉で中断（チェックポイントは残るので後で再挑戦できる）。
+ * 現在のウェイポイントがチェックポイント保留中で作業距離の外なら、CPへ歩み寄る。
+ */
+function updateRepair(state: SimState, i: Intruder, dt: number): boolean {
+  if (remainingRepairs(state) <= 0) return false;
+  const cp = state.checkpoints.find(
+    (c) => !c.repaired && dist2d(c.x, c.z, i.x, i.z) <= INTRUDER.repair.range,
+  );
+
+  // 兵士が近い/コーンに捕捉されたら中断して通常の回避行動へ
+  const st = INTRUDER.stealth;
+  const soldierCones = collectThreatCones(state, i).filter((t) => t.kind === 'soldier');
+  const danger =
+    soldierCones.some(
+      (t) => dist2d(t.x, t.z, i.x, i.z) <= INTRUDER.repair.abortSoldierDist,
+    ) ||
+    soldierCones.some((t) =>
+      coneCovers(state, t, i.x, i.z, st.coneMarginDist, st.coneMarginAngle),
+    );
+  if (danger) {
+    i.repairSince = null;
+    return false;
+  }
+
+  if (!cp) {
+    i.repairSince = null;
+    // ウェイポイントがCP保留中なのに作業距離の外 → CP自体へ歩み寄る
+    // （中継点が保留に掛かった場合の自縄自縛=フリーズを防ぐ）
+    const wp = i.path[Math.min(i.pathIdx, i.path.length - 1)];
+    const heldCp = state.checkpoints.find(
+      (c) =>
+        !c.repaired &&
+        dist2d(wp.x, wp.z, c.x, c.z) <= INTRUDER.repair.holdWaypointDist,
+    );
+    if (!heldCp) return false;
+    i.moveMode = 'sneak';
+    const r = moveTowards(
+      i, heldCp.x, heldCp.z,
+      INTRUDER.speed.sneak, INTRUDER.turnRate, dt,
+      state.map, i.radius, INTRUDER.repair.range * 0.6,
+    );
+    emitFootsteps(state, i, 'sneak', r.moved, dt);
+    return true;
+  }
+
+  // 作業（静止・無音）。周囲を見回して警戒
+  i.moveMode = 'sneak';
+  if (i.repairSince === null) i.repairSince = state.time;
+  const sweep = Math.sin(state.time * 1.8 + i.id) * SOLDIER.neckMaxAngle;
+  i.neckFacing = turnNeckToward(
+    i.facing, i.neckFacing, i.facing + sweep,
+    SOLDIER.neckTurnRate * dt, SOLDIER.neckMaxAngle,
+  );
+  if (state.time - i.repairSince >= INTRUDER.repair.timeSec) {
+    cp.repaired = true;
+    i.repairSince = null;
+    pushEvent(state.events, {
+      time: state.time,
+      kind: 'checkpoint_repaired',
+      actorId: i.id,
+      targetId: cp.id,
+      x: cp.x,
+      z: cp.z,
+    });
+    // 規定数に達したらゴールの門を開く
+    if (state.map.gate && remainingRepairs(state) === 0) {
+      const door = state.map.doors.find((d) => d.id === state.map.gate!.doorId);
+      if (door && !door.open) {
+        door.open = true;
+        pushEvent(state.events, {
+          time: state.time,
+          kind: 'gate_opened',
+          actorId: i.id,
+          x: cp.x,
+          z: cp.z,
+        });
+      }
+    }
+  }
+  return true;
 }
 
 // =========================================================================

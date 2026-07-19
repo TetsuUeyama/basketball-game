@@ -8,25 +8,25 @@
 import { degToRad } from '../Core/MathUtils';
 import type { VisionParams } from '../Perception/Vision';
 
-/** 兵士の視覚。中心視は通路1本を見切れない程度に抑える（隠密側に隙間を残す） */
+/** 兵士の視覚。全体で約70°のコーン（ユーザー指定 — 広すぎる視界を抑える） */
 export const SOLDIER_VISION: VisionParams = {
-  /** 中心視野半角（細部判別 — 即座に敵と認識） */
-  centralHalfAngle: degToRad(30),
+  /** 中心視野半角（細部判別 — 即座に敵と認識）。全50° */
+  centralHalfAngle: degToRad(25),
   /** 中心視野の認識距離 (m) */
   centralRange: 16,
-  /** 周辺視野半角（動体検知 — 違和感として認識） */
-  peripheralHalfAngle: degToRad(95),
+  /** 周辺視野半角（動体検知 — 違和感として認識）。全70° */
+  peripheralHalfAngle: degToRad(35),
   /** 周辺視野の認識距離 (m) */
   peripheralRange: 9,
 };
 
-/** 監視カメラの視覚（単一コーン） */
+/** 監視カメラの視覚（単一コーン）。首振りと合わせた実効カバーが広がりすぎない範囲に */
 export const CAMERA_VISION: VisionParams = {
   centralHalfAngle: degToRad(32),
-  centralRange: 18,
+  centralRange: 13,
   // カメラに周辺視野は無い（中心と同値にして単一コーン化）
   peripheralHalfAngle: degToRad(32),
-  peripheralRange: 18,
+  peripheralRange: 13,
 };
 
 /** 侵入者の視覚（警備の位置学習用）。プロの侵入者は警備より警戒力が高い */

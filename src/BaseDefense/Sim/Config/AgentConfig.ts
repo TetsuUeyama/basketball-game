@@ -22,7 +22,9 @@ export const SOLDIER = {
   hp: 100,
   weight: 80,
   weapon: {
-    range: 18,
+    // 視程(16m)より短い = 発見しても撃つには距離を詰める必要がある。
+    // 逃げ足(4.5) > 追跡(4.0) なので「発見=即死」ではなく逃走の目が残る
+    range: 12,
     damage: 34,
     cooldownSec: 0.8,
   },
@@ -38,7 +40,7 @@ export const SOLDIER = {
   /** COMBAT */
   combat: {
     /** 見失ってから SEARCH へ落ちるまでの秒数 */
-    lostTargetSec: 3.0,
+    lostTargetSec: 2.0,
     /** 射程 × この係数より遠ければ追跡で詰める */
     chaseStopRatio: 0.75,
     /** 発砲に必要な照準許容角 */
@@ -87,6 +89,18 @@ export const INTRUDER = {
     resumeAfterCalmSec: 12,
     /** HPがこの割合以下なら任務続行を諦めて本当に撤退する */
     woundedRetreatHpRatio: 0.35,
+  },
+  /** チェックポイント修理 */
+  repair: {
+    /** 作業可能距離 (m) */
+    range: 1.6,
+    /** 修理に要する連続作業秒数 */
+    timeSec: 4.0,
+    /** 視認した兵士がこの距離内に来たら作業を中断して退避 */
+    abortSoldierDist: 12,
+    /** ウェイポイントが未修理チェックポイントのこの距離内にある場合、修理完了まで先へ進まない
+     *  （注意: 中継ウェイポイントが誤って掛からないよう、CP指定ウェイポイントの隣接距離より少しだけ大きく） */
+    holdWaypointDist: 1.6,
   },
   /** カメラ無効化（サボタージュ）— コーン外から背後に回り込んで作業する */
   sabotage: {

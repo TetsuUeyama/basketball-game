@@ -14,6 +14,8 @@ export type SimEventKind =
   | 'camera_detect'   // 監視カメラ検知
   | 'camera_disabled' // 侵入者によるカメラ無効化
   | 'camera_feed_lost'// 管制が映像喪失に気づき調査を指示
+  | 'checkpoint_repaired' // チェックポイント修理完了
+  | 'gate_opened'     // 規定数の修理でゴールの門が開いた
   | 'shot'            // 発砲
   | 'kill'            // 排除/死亡
   | 'objective_taken' // 機密奪取

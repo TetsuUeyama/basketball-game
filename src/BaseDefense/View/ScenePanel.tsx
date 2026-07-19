@@ -39,6 +39,9 @@ export function ScenePanel() {
     outcome: null,
     soldiers: [],
     recentEvents: [],
+    repairedCount: 0,
+    requiredRepairs: 0,
+    gateOpen: false,
   });
 
   useEffect(() => {
@@ -58,7 +61,7 @@ export function ScenePanel() {
     // --- カメラ・ライト・マップ・エンティティ表示 ---
     createOverheadCamera(scene, canvas, state.map.width, state.map.depth);
     createLights(scene);
-    buildMapMeshes(scene, state.map);
+    const mapViz = buildMapMeshes(scene, state.map);
     const agents = new AgentMeshes(scene, state);
     const cones = new VisionConeViz(scene, state);
     const ripples = new SoundRippleViz(scene);
@@ -67,6 +70,7 @@ export function ScenePanel() {
     scene.onBeforeRenderObservable.add(() => {
       const dt = Math.min(engine.getDeltaTime() / 1000, MAX_DT);
       updateSim(state, dt);
+      mapViz.sync(state);
       agents.sync(state);
       cones.sync(state);
       ripples.sync(state);
@@ -82,6 +86,9 @@ export function ScenePanel() {
 
     // --- HUD 更新（4Hz） ---
     const hudInterval = setInterval(() => {
+      const gateDoor = state.map.gate
+        ? state.map.doors.find((d) => d.id === state.map.gate!.doorId)
+        : null;
       setHud({
         time: state.time,
         timeLimit: state.timeLimitSec,
@@ -95,6 +102,9 @@ export function ScenePanel() {
           .filter((ev) => ev.kind !== 'fsm_change' && ev.kind !== 'sighting_lost')
           .slice(-6)
           .map(formatEvent),
+        repairedCount: state.checkpoints.filter((cp) => cp.repaired).length,
+        requiredRepairs: state.map.gate?.requiredRepairs ?? 0,
+        gateOpen: gateDoor?.open ?? true,
       });
     }, 250);
 
@@ -129,6 +139,10 @@ function formatEvent(ev: SimEvent): string {
       return `${t} カメラ${ev.targetId} が無効化された！`;
     case 'camera_feed_lost':
       return `${t} 管制: カメラ${ev.actorId} 応答なし — 調査指示`;
+    case 'checkpoint_repaired':
+      return `${t} チェックポイント${ev.targetId} が修理された！`;
+    case 'gate_opened':
+      return `${t} ゴールの門が開いた！`;
     case 'radio':
       return `${t} 兵士${ev.actorId} が無線で目撃情報を受信`;
     case 'shot':

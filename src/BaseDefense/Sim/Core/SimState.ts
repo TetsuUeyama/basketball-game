@@ -98,6 +98,12 @@ export interface Intruder extends AgentBase {
   sabotageTargetId: number | null;
   /** 作業圏内に入った時刻（連続 timeSec で無効化完了。離れたらリセット） */
   sabotageSince: number | null;
+  /** チェックポイント修理の作業開始時刻（null=作業していない） */
+  repairSince: number | null;
+  /** スタック検知（移動意図があるのに進めない状態の開始時刻） */
+  stuckSince: number | null;
+  /** スタック解消のための一時迂回目標 */
+  detour: { x: number; z: number } | null;
 }
 
 export interface SecurityCamera {
@@ -116,6 +122,14 @@ export interface SecurityCamera {
   visibleIntruders: Set<number>;
 }
 
+/** チェックポイントの実行時状態 */
+export interface CheckpointState {
+  id: number;
+  x: number;
+  z: number;
+  repaired: boolean;
+}
+
 export interface SimState {
   time: number;
   tick: number;
@@ -125,6 +139,8 @@ export interface SimState {
   soldiers: Soldier[];
   intruders: Intruder[];
   cameras: SecurityCamera[];
+  /** チェックポイント（map.checkpoints から初期化される実行時状態） */
+  checkpoints: CheckpointState[];
   sounds: SoundEvent[];
   /** 配送待ちの無線メッセージ（deliverAt 順に処理） */
   radio: RadioMessage[];
@@ -170,16 +186,22 @@ export interface SimSetup {
 
 export function createSimState(setup: SimSetup): SimState {
   let nextId = 1;
+  const rng = mulberry32(setup.seed);
 
   const soldiers: Soldier[] = setup.soldiers.map((s) => {
-    // 初期向きは最初のウェイポイント方向
-    const p0 = s.route.points[0];
-    const facing = p0 ? angleOf(p0.x - s.x, p0.z - s.z) : 0;
+    // 巡回開始位置はシードでランダム化する（現実の警備は同期していない —
+    // 固定開始だと侵入者との遭遇タイミングが全シードで同一になり統計が壊れる）
+    const startIdx =
+      s.route.points.length > 1 ? Math.floor(rng() * s.route.points.length) : 0;
+    const start = s.route.points[startIdx] ?? { x: s.x, z: s.z };
+    const next =
+      s.route.points[(startIdx + 1) % Math.max(s.route.points.length, 1)];
+    const facing = next ? angleOf(next.x - start.x, next.z - start.z) : 0;
     return {
       id: nextId++,
       kind: 'soldier',
-      x: s.x,
-      z: s.z,
+      x: start.x,
+      z: start.z,
       facing,
       neckFacing: facing,
       hp: SOLDIER.hp,
@@ -191,7 +213,7 @@ export function createSimState(setup: SimSetup): SimState {
       suspicion: 0,
       stimulus: null,
       route: s.route,
-      routeIdx: 0,
+      routeIdx: startIdx,
       routeDir: 1,
       waitUntil: 0,
       pendingAdvance: false,
@@ -235,6 +257,9 @@ export function createSimState(setup: SimSetup): SimState {
       lastKnownHp: INTRUDER.hp,
       sabotageTargetId: null,
       sabotageSince: null,
+      repairSince: null,
+      stuckSince: null,
+      detour: null,
     };
   });
 
@@ -256,11 +281,17 @@ export function createSimState(setup: SimSetup): SimState {
     time: 0,
     tick: 0,
     seed: setup.seed,
-    rng: mulberry32(setup.seed),
+    rng, // 兵士初期配置で消費した続きから（シード決定論は維持）
     map: setup.map,
     soldiers,
     intruders,
     cameras,
+    checkpoints: setup.map.checkpoints.map((cp) => ({
+      id: cp.id,
+      x: cp.x,
+      z: cp.z,
+      repaired: false,
+    })),
     sounds: [],
     radio: [],
     events: [],

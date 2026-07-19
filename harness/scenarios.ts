@@ -21,6 +21,8 @@ export function emptyMap(): BaseMap {
     objective: { x: -28, z: -18 },
     exfilZones: [{ x: 28, z: -18, r: 1.0 }],
     intruderSpawns: [{ x: 0, z: -18 }],
+    checkpoints: [],
+    gate: null,
   };
 }
 

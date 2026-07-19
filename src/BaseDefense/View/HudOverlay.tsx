@@ -13,6 +13,10 @@ export interface HudData {
   outcome: { winner: 'intruder' | 'defender'; reason: string; time: number } | null;
   soldiers: { id: number; state: SoldierFsmState; suspicion: number }[];
   recentEvents: string[];
+  /** チェックポイント修理の進捗 */
+  repairedCount: number;
+  requiredRepairs: number;
+  gateOpen: boolean;
 }
 
 const STATE_LABEL: Record<SoldierFsmState, string> = {
@@ -40,6 +44,19 @@ export function HudOverlay({ data, onReset }: { data: HudData; onReset: () => vo
         <div className="text-lg">
           {mm}:{ss} <span className="text-gray-400 text-xs">/ {Math.floor(data.timeLimit / 60)}:00</span>
         </div>
+        {data.requiredRepairs > 0 && (
+          <div className="mb-1">
+            <span className="text-gray-300">修理 </span>
+            <span className={data.repairedCount >= data.requiredRepairs ? 'text-green-400' : 'text-yellow-300'}>
+              {Math.min(data.repairedCount, data.requiredRepairs)}/{data.requiredRepairs}
+            </span>
+            <span className="ml-2">
+              門: <span className={data.gateOpen ? 'text-green-400' : 'text-red-400'}>
+                {data.gateOpen ? '開' : '閉'}
+              </span>
+            </span>
+          </div>
+        )}
         {data.soldiers.map((s) => (
           <div key={s.id} className="flex gap-2 items-center">
             <span>兵士{s.id}</span>

@@ -269,6 +269,28 @@ console.log('■ 参考統計: デフォルト試合 20 シード（FSM+交戦+�
     totalShots += state.events.filter((e) => e.kind === 'shot').length;
     totalKills += state.events.filter((e) => e.kind === 'kill').length;
   }
+  // チェックポイント整合性: 機密奪取は必ず「3修理→門開放」の後で起きること
+  let gateIntegrityOk = true;
+  let repairSamples = 0;
+  for (let seed = 300; seed < 310; seed++) {
+    const state = createSimState(createDefaultSetup(seed));
+    runFor(state, state.timeLimitSec + 5);
+    const repairs = state.events.filter((e) => e.kind === 'checkpoint_repaired');
+    const gateOpen = state.events.find((e) => e.kind === 'gate_opened');
+    const taken = state.events.find((e) => e.kind === 'objective_taken');
+    repairSamples += repairs.length;
+    if (gateOpen) {
+      const before = repairs.filter((e) => e.time <= gateOpen.time).length;
+      if (before < 3) gateIntegrityOk = false;
+    }
+    if (taken && (!gateOpen || gateOpen.time > taken.time)) gateIntegrityOk = false;
+  }
+  check(
+    '門の整合性（奪取は必ず3修理→開門の後）',
+    gateIntegrityOk,
+    `10シードで修理イベント計${repairSamples}件`,
+  );
+
   console.log(`  勝敗分布: ${JSON.stringify(outcomes)}`);
   console.log(
     `  イベント/試合: 視認${(totalSightings / N).toFixed(1)} ` +

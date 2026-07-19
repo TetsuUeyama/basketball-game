@@ -33,6 +33,21 @@ export interface CircleZone {
   r: number;
 }
 
+/** チェックポイント（配電盤）。規定数を修理するとゴールの門が開く */
+export interface Checkpoint {
+  id: number;
+  x: number;
+  z: number;
+}
+
+/** ゴールの門の設定 */
+export interface GateConfig {
+  /** 開放されるドアの DoorState.id */
+  doorId: number;
+  /** 開放に必要な修理済みチェックポイント数 */
+  requiredRepairs: number;
+}
+
 export interface BaseMap {
   /** X方向全幅 (m)。原点はマップ中心 */
   width: number;
@@ -46,6 +61,10 @@ export interface BaseMap {
   exfilZones: CircleZone[];
   /** 侵入者のスポーン地点 */
   intruderSpawns: { x: number; z: number }[];
+  /** チェックポイント（配電盤）の設置位置 */
+  checkpoints: Checkpoint[];
+  /** ゴールの門。null なら門メカニクスなし（テスト用マップ等） */
+  gate: GateConfig | null;
 }
 
 /** 巡回ルート */
