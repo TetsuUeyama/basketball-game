@@ -3,7 +3,9 @@
     "allow": [
       "WebSearch",
       "WebFetch",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git rm *)"
     ]
   }
 }
